@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*" Name="ToHost Bridge" Language="1033" Version="1.0.1.0" Manufacturer="Max Coppola" UpgradeCode="{5D8A3B2C-1F4D-4E5A-9B6C-8E7D9F0A1B2C}">
+        <Package InstallerVersion="200" Compressed="yes" InstallScope="perUser" />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Property Id="ALLUSERS" Value="2" />
+        <Property Id="MSIINSTALLPERUSER" Value="1" />
+        <Property Id="WIXUI_INSTALLDIR" Value="ToHostBridge_Folder" />
+
+        <Icon Id="app.ico" SourceFile="app.ico" />
+        <Property Id="ARPPRODUCTICON" Value="app.ico" />
+
+        <!-- MIDI Services Check -->
+        <Property Id="WMS_APP_FOUND" Secure="yes">
+            <DirectorySearch Id="CheckProgFiles64" Path="[ProgramFiles64Folder]">
+                <DirectorySearch Id="CheckWMS" Path="Windows MIDI Services">
+                    <DirectorySearch Id="CheckTools" Path="Tools">
+                        <DirectorySearch Id="CheckSettings" Path="Settings">
+                            <FileSearch Id="CheckMidiSettings" Name="MidiSettings.exe" />
+                        </DirectorySearch>
+                    </DirectorySearch>
+                </DirectorySearch>
+            </DirectorySearch>
+        </Property>
+
+        <Property Id="WMS_SERVICE_FOUND" Secure="yes">
+            <RegistrySearch Id="CheckMidiSrvReg" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\MidiSrv" Name="Start" Type="raw" Win64="yes" />
+        </Property>
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="LocalAppDataFolder">
+                <Directory Id="ToHostBridge_Folder" Name="ToHost Bridge" />
+            </Directory>
+            <Directory Id="DesktopFolder" Name="Desktop" />
+        </Directory>
+
+        <DirectoryRef Id="ToHostBridge_Folder">
+            <Component Id="MainExecutable" Guid="{A1B2C3D4-E5F6-4A5B-9C6D-8E7D9F0A1B2C}">
+                <RegistryValue Root="HKCU" Key="Software\MaxCoppola\ToHostBridge" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+                <File Id="ToHostBridgeEXE" Source="build\Release\ToHostBridge.exe" Checksum="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <DirectoryRef Id="DesktopFolder">
+            <Component Id="DesktopShortcut" Guid="{B2C3D4E5-F6A7-4B6C-9D7E-8F8D9A0B1C2D}">
+                <Condition>INSTALL_SHORTCUT = 1</Condition>
+                <RegistryValue Root="HKCU" Key="Software\MaxCoppola\ToHostBridge" Name="desktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+                <Shortcut Id="ApplicationDesktopShortcut"
+                          Name="ToHost Bridge"
+                          Description="Bridges MIDI to Yamaha Serial TO HOST"
+                          Target="[ToHostBridge_Folder]ToHostBridge.exe"
+                          WorkingDirectory="ToHostBridge_Folder"
+                          Icon="app.ico" />
+                <RemoveFolder Id="RemoveDesktopFolder" On="uninstall" />
+            </Component>
+        </DirectoryRef>
+
+        <Feature Id="ProductFeature" Title="ToHost Bridge" Level="1">
+            <ComponentRef Id="MainExecutable" />
+            <ComponentRef Id="DesktopShortcut" />
+        </Feature>
+
+        <Property Id="INSTALL_SHORTCUT" Value="1" />
+
+        <UI>
+            <UIRef Id="WixUI_InstallDir" />
+            
+            <Dialog Id="WmsCheckDlg" Width="370" Height="270" Title="Windows MIDI Services Required">
+                <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next" />
+                <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back" />
+                <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+                    <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+                </Control>
+
+                <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+                <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+                <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+                <Control Id="Title" Type="Text" X="15" Y="6" Width="300" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Windows MIDI Services Dependency" />
+                
+                <Control Id="Text1" Type="Text" X="25" Y="60" Width="320" Height="45" Text="ToHost Bridge requires the Microsoft Windows MIDI Services (WMS) to function correctly. This provides the virtual MIDI ports and MIDI 2.0 capabilities needed to bridge your hardware." />
+                <Control Id="Text2" Type="Text" X="25" Y="110" Width="320" Height="30" Text="If you haven't installed it yet, please download and install the 'Runtime and Tools' package from the Microsoft MIDI page." />
+                
+                <Control Id="DownloadButton" Type="PushButton" X="25" Y="145" Width="180" Height="17" Text="Download Windows MIDI Services">
+                    <Publish Event="DoAction" Value="OpenWmsDownload">1</Publish>
+                </Control>
+            </Dialog>
+
+            <Dialog Id="OptionsDlg" Width="370" Height="270" Title="Installation Options">
+                <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next" />
+                <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back" />
+                <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+                    <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+                </Control>
+
+                <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Please select the installation options for ToHost Bridge." />
+                <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Installation Options" />
+                <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+                <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+                <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+                <Control Id="ShortcutCheckBox" Type="CheckBox" X="40" Y="60" Width="230" Height="17" Property="INSTALL_SHORTCUT" CheckBoxValue="1" Text="Create a shortcut on the desktop" />
+            </Dialog>
+
+            <!-- MANDATORY Navigation sequence overrides -->
+            <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="WmsCheckDlg" Order="10">1</Publish>
+            <Publish Dialog="WmsCheckDlg" Control="Back" Event="NewDialog" Value="LicenseAgreementDlg" Order="10">1</Publish>
+            <Publish Dialog="WmsCheckDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="10">1</Publish>
+            <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WmsCheckDlg" Order="10">1</Publish>
+            <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="OptionsDlg" Order="10">WIXUI_INSTALLDIR_VALID="1"</Publish>
+            <Publish Dialog="OptionsDlg" Control="Back" Event="NewDialog" Value="InstallDirDlg">1</Publish>
+            <Publish Dialog="OptionsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg">1</Publish>
+            <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OptionsDlg" Order="5">NOT Installed</Publish>
+
+            <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
+        </UI>
+        
+        <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch ToHost Bridge" />
+        <Property Id="WixShellExecTarget" Value="[#ToHostBridgeEXE]" />
+        
+        <Binary Id="LaunchUrlScript" SourceFile="launch_url.vbs" />
+        <CustomAction Id="OpenWmsDownload" BinaryKey="LaunchUrlScript" VBScriptCall="" Execute="immediate" Return="check" />
+        <CustomAction Id="LaunchApplication" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+
+    </Product>
+</Wix>
