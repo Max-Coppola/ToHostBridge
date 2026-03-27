@@ -22,7 +22,7 @@ VirtualMidiPort::VirtualMidiPort(const std::wstring& portName, MidiRxCallback rx
         MidiVirtualDeviceCreationConfig config(
             portName, 
             L"Virtual MIDI Port", 
-            L"ToHostBridge", 
+            L"MidiSerialBridge", 
             info);
 
         m_virtualDevice = MidiVirtualDeviceManager::CreateVirtualDevice(config);

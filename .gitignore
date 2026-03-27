@@ -38,3 +38,14 @@ ipch/
 *.wixpdb
 *.msi
 !releases/*.msi
+
+# Local development test tools
+test_tool/
+
+# External SDK and libraries
+include/
+packages/
+
+# Release archives
+*.zip
+!ToHostBridge_CLEAN_origin.zip # specifically allow the original if needed? No, let's keep it simple.

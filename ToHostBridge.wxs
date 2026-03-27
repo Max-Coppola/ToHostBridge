@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-    <Product Id="*" Name="ToHost Bridge" Language="1033" Version="1.0.1.0" Manufacturer="Max Coppola" UpgradeCode="{5D8A3B2C-1F4D-4E5A-9B6C-8E7D9F0A1B2C}">
+    <Product Id="*" Name="ToHost Bridge" Language="1033" Version="1.1.0" Manufacturer="Max Coppola" UpgradeCode="{5D8A3B2C-1F4D-4E5A-9B6C-8E7D9F0A1B2C}">
         <Package InstallerVersion="200" Compressed="yes" InstallScope="perUser" />
 
-        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." AllowSameVersionUpgrades="yes" />
         <MediaTemplate EmbedCab="yes" />
 
         <Property Id="ALLUSERS" Value="2" />

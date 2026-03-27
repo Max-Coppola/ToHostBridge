@@ -62,6 +62,42 @@ std::atomic<int> g_lastSentPort{0};
 std::atomic<bool> g_portEnabled[4];
 // portInEnabled: controls COM -> virtual In (serial receive callback)
 std::atomic<bool> g_portInEnabled{true};
+std::string g_detectedSynth = "";
+std::mutex g_synthNameOverlayMutex;
+bool g_waitingForIdentity = false;
+
+struct YamahaSynthIdentity {
+    uint8_t fMSB, fLSB, mMSB, mLSB;
+    const char* name;
+};
+
+const YamahaSynthIdentity g_xgSynthTable[] = {
+    {0x41, 0x00, 0x1B, 0x00, "Yamaha MU2000"},
+    {0x41, 0x1B, 0x04, 0x0A, "Yamaha MU2000EX"},
+    {0x41, 0x00, 0x1C, 0x00, "Yamaha MU1000"},
+    {0x41, 0x00, 0x03, 0x00, "Yamaha MU128/MU100"},
+    {0x41, 0x4B, 0x01, 0x00, "Yamaha MU100 (Legacy)"},
+    {0x41, 0x49, 0x01, 0x00, "Yamaha MU90"},
+    {0x11, 0x03, 0x00, 0x00, "Yamaha MU80"},
+    {0x11, 0x04, 0x00, 0x00, "Yamaha MU50"},
+    {0x11, 0x05, 0x00, 0x00, "Yamaha MU15/MU10"},
+    {0x11, 0x06, 0x00, 0x00, "Yamaha MU5"},
+    {0x41, 0x5C, 0x03, 0x00, "Yamaha CS6x/CS6R"},
+    {0x41, 0x10, 0x02, 0x00, "Yamaha CS1x"},
+    {0x41, 0x22, 0x02, 0x00, "Yamaha CS2x"},
+    {0x41, 0x11, 0x02, 0x00, "Yamaha AN1x"},
+    {0x41, 0x5E, 0x03, 0x00, "Yamaha S80"},
+    {0x41, 0x23, 0x04, 0x00, "Yamaha S30"},
+    {0x41, 0x7F, 0x00, 0x00, "Yamaha S90/S90ES"},
+    {0x41, 0x49, 0x1B, 0x00, "Yamaha QY100"},
+    {0x41, 0x49, 0x0B, 0x00, "Yamaha QY70"},
+    {0x41, 0x4C, 0x00, 0x00, "Yamaha CBX-K1/K2"},
+    {0x41, 0x27, 0x01, 0x00, "Yamaha Clavinova CLP"},
+    {0x41, 0x26, 0x01, 0x00, "Yamaha Clavinova CVP"},
+    {0x41, 0x49, 0x04, 0x00, "Yamaha VL70-m"},
+    {0x41, 0x00, 0x01, 0x00, "Yamaha SW1000XG"}
+};
+const int g_xgSynthTableSize = sizeof(g_xgSynthTable) / sizeof(YamahaSynthIdentity);
 // Bandwidth monitoring
 std::atomic<uint64_t> g_bytesSent{0};
 std::atomic<uint64_t> g_bytesReceived{0};
@@ -304,7 +340,7 @@ void SetStartWithWindowsRegistry(bool enable) {
         if (enable) {
             char path[MAX_PATH];
             GetModuleFileNameA(NULL, path, MAX_PATH);
-            RegSetValueExA(hKey, "ToHostBridge", 0, REG_SZ, (const BYTE*)path, strlen(path) + 1);
+            RegSetValueExA(hKey, "ToHostBridge", 0, REG_SZ, (const BYTE*)path, (DWORD)(strlen(path) + 1));
         } else {
             RegDeleteValueA(hKey, "ToHostBridge");
         }
@@ -327,7 +363,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
     winrt::init_apartment();
     Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer midiInit;
-    bool midiAvailable = midiInit.InitializeSdkRuntime() && midiInit.EnsureServiceAvailable();
+    bool sdkAvailable = midiInit.InitializeSdkRuntime() && midiInit.EnsureServiceAvailable();
+    bool midiAvailable = sdkAvailable || midiInit.IsServiceInstalled();
 
     ImGui_ImplWin32_EnableDpiAwareness();
     float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
@@ -335,7 +372,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), nullptr, nullptr, nullptr, L"ToHostBridge", LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) };
     ::RegisterClassExW(&wc);
     // Adjusted window dimensions for bold headers and better spacing
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.0", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.1", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hwnd;
@@ -528,6 +565,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), cOut, isSync, GetMidiCommandName(data));
                     });
                 g_virtualPortsOut.push_back(std::move(vport));
+                ::Sleep(100); // Small delay to ensure sequential registration in Windows MIDI Services
             }
             if (g_portInEnabled.load(std::memory_order_relaxed)) {
                 std::wstring inPortName = wBaseName + L" In";
@@ -569,6 +607,28 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         if (g_portInEnabled.load(std::memory_order_relaxed) && g_virtualPortIn) 
                             g_virtualPortIn->SendMidi(parser->sysexBuffer);
                         AddLog(LogSourceType::COM_IN, "[COM->App] SysEx: " + BytesToHex(parser->sysexBuffer), colIn, false, "System Exclusive");
+                        
+                        // Identity Reply: F0 7E [dev] 06 02 43 00 [fMSB] [fLSB] [mMSB] [mLSB] ... F7
+                        if (parser->sysexBuffer.size() >= 12 && parser->sysexBuffer[1] == 0x7E && parser->sysexBuffer[3] == 0x06 && parser->sysexBuffer[4] == 0x02 && parser->sysexBuffer[5] == 0x43) {
+                            uint8_t fMSB = parser->sysexBuffer[7];
+                            uint8_t fLSB = parser->sysexBuffer[8];
+                            uint8_t mMSB = parser->sysexBuffer[9];
+                            uint8_t mLSB = parser->sysexBuffer[10];
+
+                            std::string foundName = "Unknown (" + BytesToHex({fMSB, fLSB, mMSB, mLSB}) + ")";
+                            for (int i = 0; i < g_xgSynthTableSize; ++i) {
+                                if (g_xgSynthTable[i].fMSB == fMSB && g_xgSynthTable[i].fLSB == fLSB &&
+                                    g_xgSynthTable[i].mMSB == mMSB && g_xgSynthTable[i].mLSB == mLSB) {
+                                    foundName = g_xgSynthTable[i].name;
+                                    break;
+                                }
+                            }
+                            {
+                                std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
+                                g_detectedSynth = foundName;
+                                g_waitingForIdentity = false;
+                            }
+                        }
                         parser->isSysEx = false;
                     } else if (b >= 0x80) {
                         // Abort SysEx on any other status byte
@@ -623,6 +683,30 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             AddLog(LogSourceType::APP_INFO, "Connected to " + comName + " (" + baseNameStr + ")", colSys);
             isConnected = true;
             connectionLost = false;
+
+            // Auto-trigger Synth Identity Discovery on connect (Immediate)
+            if (g_serialPort && g_serialPort->IsOpen()) {
+                // Auto-trigger Synth Identity Discovery on connect (Immediate)
+                std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
+                g_serialPort->Write(stdId);
+                AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), colSys, false, "(Identity Request)");
+                
+                {
+                    std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
+                    g_detectedSynth = "";
+                    g_waitingForIdentity = true;
+                }
+                // Timeout to clear "Querying..." if no reply
+                std::thread([&]() {
+                    Sleep(2000);
+                    if (g_waitingForIdentity) {
+                        std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
+                        if (g_detectedSynth == "Querying...") g_detectedSynth = "";
+                        g_waitingForIdentity = false;
+                    }
+                }).detach();
+            }
+
             // Persist the newly-connected COM port name to settings
             SaveSettings(comName, baseNameStr, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
         } else {
@@ -740,8 +824,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             prevSent = curSent; prevRecv = curRecv;
             
             float newCharge = isConnected ? ((float)chargeRaw > 100.0f ? 100.0f : (float)chargeRaw) : 0.0f;
-            // Smooth moving average (alpha=0.4) to avoid instant spikes on transient bursts
-            g_chargePercent = (g_chargePercent * 0.6f) + (newCharge * 0.4f);
+            // High alpha (0.7) for fast capture, and immediate reset on zero to avoid the "laggy" tail
+            if (newCharge == 0.0f) g_chargePercent = 0.0f;
+            else g_chargePercent = (g_chargePercent * 0.3f) + (newCharge * 0.7f);
             // Update Win32 title bar
             std::wstring wTitle = L"ToHost Bridge v1.0";
 
@@ -791,6 +876,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             }
         }
         ImGui::Separator();
+  
+        // Top-right device overlay
+        float preTabY = ImGui::GetCursorPosY();
+        if (isConnected && !g_detectedSynth.empty()) {
+            std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
+            std::string disp = g_detectedSynth;
+            float textWidth = ImGui::CalcTextSize(disp.c_str()).x;
+            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - textWidth - 5.0f);
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "%s", disp.c_str());
+            ImGui::SetCursorPosY(preTabY);
+        }
 
         if (ImGui::BeginTabBar("Tabs")) {
 
@@ -798,16 +894,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             if (ImGui::BeginTabItem("Connection")) {
                 ImGui::Spacing();
                 bool portsRunning = !g_virtualPortsOut.empty();
-                if (portsRunning || isConnected) ImGui::BeginDisabled();
-
+                
+                ImGui::BeginDisabled(isConnected);
                 if (ImGui::Button("Refresh COM Ports")) {
                     comPortsVec = GetAvailableComPorts();
                     comPorts.clear();
                     for (const auto& p : comPortsVec) comPorts.push_back(p.c_str());
                     selectedComPort = 0;
                 }
+                ImGui::EndDisabled();
                 ImGui::SameLine();
                 
+                ImGui::BeginDisabled(portsRunning || isConnected);
                 // Port Enables
                 {
                     bool enIn = g_portInEnabled.load(std::memory_order_relaxed);
@@ -826,7 +924,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     SaveSettings("", baseNameBuf, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
                 }
                 
-                if (portsRunning) ImGui::EndDisabled();
+                ImGui::EndDisabled();
 
                 ImGui::Spacing();
                 
@@ -1025,7 +1123,34 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     cachedSnapshot.clear();
                     frozenSnapshot.clear();
                 }
+            ImGui::SameLine();
+            if (ImGui::Button("Get Synth Info")) {
+                if (g_serialPort && g_serialPort->IsOpen()) {
+                    std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
+                    g_serialPort->Write(stdId);
 
+                    AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), colSys, false, "(Identity Request)");
+
+                    {
+                        std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
+                        g_detectedSynth = "";
+                        g_waitingForIdentity = true;
+                    }
+                    // Timeout for manual button too
+                    std::thread([&]() {
+                        Sleep(2000);
+                        if (g_waitingForIdentity) {
+                            std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
+                            if (g_detectedSynth == "Querying...") g_detectedSynth = "";
+                            g_waitingForIdentity = false;
+                        }
+                    }).detach();
+                } else {
+                    std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
+                    g_detectedSynth = "Port Closed";
+                }
+            }
+ 
                 ImGui::EndTabItem();
             }
 
@@ -1281,18 +1406,23 @@ void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
     if (!g_serialPort || !g_serialPort->IsOpen() || data.empty()) return;
 
     std::lock_guard<std::mutex> lock(g_serialWriteMutex);
-    std::vector<uint8_t> outData;
+    std::vector<uint8_t> mux;
 
     // Yamaha Multiplexing (Serial TO HOST protocol):
     // Prepend 0xF5 <port> if we are switching from a different virtual port.
     // 1-indexed ports: 1-4
     if (g_lastSentPort.load(std::memory_order_relaxed) != portIdx) {
-        outData.push_back(0xF5);
-        outData.push_back((uint8_t)portIdx);
+        mux.push_back(0xF5);
+        mux.push_back((uint8_t)portIdx);
         g_lastSentPort.store(portIdx, std::memory_order_relaxed);
+        
+        // Log the multiplexing byte for visibility (Port Select)
+        AddLog(LogSourceType::APP_INFO, "[Port Select] F5 " + BytesToHex({(uint8_t)portIdx}) + " (Addressing Parts " + std::to_string((portIdx-1)*16+1) + "-" + std::to_string(portIdx*16) + ")", ImVec4(1,1,1,1));
+        
+        g_serialPort->Write(mux);
+        g_bytesSent.fetch_add(mux.size(), std::memory_order_relaxed);
     }
 
-    outData.insert(outData.end(), data.begin(), data.end());
-    g_serialPort->Write(outData);
-    g_bytesSent.fetch_add(outData.size(), std::memory_order_relaxed);
+    g_serialPort->Write(data);
+    g_bytesSent.fetch_add(data.size(), std::memory_order_relaxed);
 }
