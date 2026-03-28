@@ -147,6 +147,12 @@ nav {
     background: rgba(255, 255, 255, 0.1);
 }
 
+.btn-small {
+    padding: 10px 20px;
+    font-size: 14px;
+    align-self: center;
+}
+
 .version {
     font-size: 14px;
     color: var(--text-dim);

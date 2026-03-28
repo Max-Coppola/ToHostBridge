@@ -63,6 +63,14 @@ std::atomic<bool> g_portEnabled[4];
 // portInEnabled: controls COM -> virtual In (serial receive callback)
 std::atomic<bool> g_portInEnabled{true};
 std::string g_detectedSynth = "";
+bool showNames = true;
+std::atomic<bool> g_isConnecting{false};
+std::atomic<bool> g_autoGetSynthInfo{true};
+
+enum class MidiServiceStatus { INITIALIZING, AVAILABLE, UNAVAILABLE, NOT_RESPONDING };
+std::atomic<MidiServiceStatus> g_midiStatus{MidiServiceStatus::INITIALIZING};
+bool midiAvailable = false;
+
 std::mutex g_synthNameOverlayMutex;
 bool g_waitingForIdentity = false;
 
@@ -125,7 +133,7 @@ struct LogEntry {
 };
 
 std::mutex g_logMutex;
-// Per-source ring buffers — each capped at g_maxLogLines independently
+// Per-source ring buffers ΓÇö each capped at g_maxLogLines independently
 std::deque<LogEntry> g_logBySource[LOG_SOURCE_COUNT];
 int g_maxLogLines = 500;
 uint64_t g_logSeq = 0;    // global sequence counter
@@ -280,6 +288,7 @@ void SaveSettings(const std::string& comName, const std::string& baseName, bool 
     WritePrivateProfileStringA("General", "StayOnTop", stayOnTop ? "1" : "0", ini.c_str());
     WritePrivateProfileStringA("General", "StartMinimized", startMinimized ? "1" : "0", ini.c_str());
     WritePrivateProfileStringA("General", "LightUI", lightUI ? "1" : "0", ini.c_str());
+    WritePrivateProfileStringA("General", "AutoGetSynthInfo", g_autoGetSynthInfo.load() ? "1" : "0", ini.c_str());
     WritePrivateProfileStringA("Ports", "PortInEnabled", g_portInEnabled.load() ? "1" : "0", ini.c_str());
     for (int p = 0; p < 4; ++p)
         WritePrivateProfileStringA("Ports", ("Port" + std::to_string(p+1) + "Enabled").c_str(), g_portEnabled[p].load() ? "1" : "0", ini.c_str());
@@ -314,6 +323,7 @@ void LoadSettings(std::string& comName, char* baseName, bool& autoStart, bool& s
     stayOnTop     = GetPrivateProfileIntA("General", "StayOnTop", 0, ini.c_str()) != 0;
     startMinimized = GetPrivateProfileIntA("General", "StartMinimized", 0, ini.c_str()) != 0;
     lightUI       = GetPrivateProfileIntA("General", "LightUI", 0, ini.c_str()) != 0;
+    g_autoGetSynthInfo.store(GetPrivateProfileIntA("General", "AutoGetSynthInfo", 1, ini.c_str()) != 0);
     g_portInEnabled.store(GetPrivateProfileIntA("Ports", "PortInEnabled", 1, ini.c_str()) != 0);
     for (int p = 0; p < 4; ++p)
         g_portEnabled[p].store(GetPrivateProfileIntA("Ports", ("Port" + std::to_string(p+1) + "Enabled").c_str(), 1, ini.c_str()) != 0);
@@ -362,9 +372,36 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     }
 
     winrt::init_apartment();
-    Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer midiInit;
-    bool sdkAvailable = midiInit.InitializeSdkRuntime() && midiInit.EnsureServiceAvailable();
-    bool midiAvailable = sdkAvailable || midiInit.IsServiceInstalled();
+    
+    // Asynchronous MIDI Service Initialization with 5-second timeout
+    std::thread midiInitThread([]() {
+        Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer midiInit;
+        bool sdkAvailable = midiInit.InitializeSdkRuntime() && midiInit.EnsureServiceAvailable();
+        bool isInstalled = midiInit.IsServiceInstalled();
+        
+        if (sdkAvailable || isInstalled) {
+            midiAvailable = true;
+            g_midiStatus.store(MidiServiceStatus::AVAILABLE);
+        } else {
+            midiAvailable = false;
+            g_midiStatus.store(MidiServiceStatus::UNAVAILABLE);
+        }
+    });
+
+    // Detach and wait for status change with timeout
+    std::thread([midiInitThread = std::move(midiInitThread)]() mutable {
+        auto start = std::chrono::steady_clock::now();
+        while (g_midiStatus.load() == MidiServiceStatus::INITIALIZING) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 5) {
+                g_midiStatus.store(MidiServiceStatus::NOT_RESPONDING);
+                midiAvailable = false;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (midiInitThread.joinable()) midiInitThread.detach(); // We let the init thread finish or hang on its own
+    }).detach();
+
 
     ImGui_ImplWin32_EnableDpiAwareness();
     float main_scale = ImGui_ImplWin32_GetDpiScaleForMonitor(::MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY));
@@ -372,7 +409,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), nullptr, nullptr, nullptr, L"ToHostBridge", LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) };
     ::RegisterClassExW(&wc);
     // Adjusted window dimensions for bold headers and better spacing
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.1", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.1.0", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hwnd;
@@ -488,7 +525,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     bool filterOut[4] = {true, true, true, true};
     bool filterSync = true;
     bool stopScroll = false;
-    bool showNames = true;
     bool showTimestamp = true;
     size_t lastRenderedVersion = 0;
 
@@ -534,7 +570,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         std::sort(merged.begin(), merged.end(), [](const LogEntry& a, const LogEntry& b){
             return a.seqNum < b.seqNum;
         });
-        // Each source is individually capped — no merged trim needed
+        // Each source is individually capped ΓÇö no merged trim needed
         cachedSnapshot = std::move(merged);
         snapshotLogVersion = g_logVersion;
         lastFilterState = {filterSys, filterIn, filterSync, {filterOut[0],filterOut[1],filterOut[2],filterOut[3]}};
@@ -542,7 +578,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
     // Pre-declare lambda for Connect
     auto ConnectPort = [&]() {
-        if (isConnected || comPorts.empty() || !midiAvailable) return;
+        if (isConnected || comPorts.empty() || g_midiStatus.load() != MidiServiceStatus::AVAILABLE) return;
         std::string baseNameStr(baseNameBuf);
         g_serialPort.reset();
 
@@ -684,8 +720,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             isConnected = true;
             connectionLost = false;
 
-            // Auto-trigger Synth Identity Discovery on connect (Immediate)
-            if (g_serialPort && g_serialPort->IsOpen()) {
+            // Auto-trigger Synth Identity Discovery on connect (if enabled)
+            if (g_serialPort && g_serialPort->IsOpen() && g_autoGetSynthInfo.load()) {
                 // Auto-trigger Synth Identity Discovery on connect (Immediate)
                 std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
                 g_serialPort->Write(stdId);
@@ -743,11 +779,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             ImVec4 colSysCopy = colSys;
             ImVec4 colInCopy  = colIn;
             std::vector<std::string> portsVecCopy = comPortsVec;
-            bool midiOk = midiAvailable;
+            // Removed captured midiOk - we'll check it live in the thread
 
             std::thread([&, savedNameCopy, baseNameCopy, autoStart, foundPort,
-                         colOutCopy, colSysCopy, colInCopy, portsVecCopy, midiOk]() mutable {
-                // ── Create virtual MIDI ports (if auto-start is enabled) ──
+                         colOutCopy, colSysCopy, colInCopy, portsVecCopy]() mutable {
+                // Wait for MIDI status to leave INITIALIZING
+                while (g_midiStatus.load() == MidiServiceStatus::INITIALIZING) { ::Sleep(100); }
+                bool midiOk = (g_midiStatus.load() == MidiServiceStatus::AVAILABLE);
+
+                // ΓöÇΓöÇ Create virtual MIDI ports (if auto-start is enabled and MIDI is AVAILABLE) ΓöÇΓöÇ
                 if (midiOk && autoStart) {
                     std::wstring wBaseName(baseNameCopy.begin(), baseNameCopy.end());
                     for (int i = 1; i <= 4; ++i) {
@@ -771,7 +811,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.", colSysCopy);
                 }
 
-                // ── Auto-connect to COM port ────────────────────────────
+                // ΓöÇΓöÇ Auto-connect to COM port ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
                 if (autoStart && !portsVecCopy.empty()) {
                     if (!savedNameCopy.empty()) {
                         for (int i = 0; i < (int)portsVecCopy.size(); ++i) {
@@ -781,7 +821,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                                 return;
                             }
                         }
-                        // Port not available yet — connectionLost already set in main
+                        // Port not available yet ΓÇö connectionLost already set in main
                     } else {
                         ConnectPort(); // no saved name, connect to first
                     }
@@ -804,14 +844,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             CreateRenderTarget();
         }
 
-        // ── Auto-Reconnect Polling + Bandwidth (every 1 second) ───────────────
+        // ΓöÇΓöÇ Auto-Reconnect Polling + Bandwidth (every 1 second) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
         static auto lastCheck = std::chrono::steady_clock::now();
         static uint64_t prevSent = 0, prevRecv = 0;
         auto nowCheck = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(nowCheck - lastCheck).count() > 1000) {
             lastCheck = nowCheck;
 
-            // Bandwidth: 38400 baud, 8N1 → 10 bits/byte → 3840 bytes/sec max
+            // Bandwidth: 38400 baud, 8N1 ΓåÆ 10 bits/byte ΓåÆ 3840 bytes/sec max
             uint64_t curSent = g_bytesSent.load(std::memory_order_relaxed);
             uint64_t curRecv = g_bytesReceived.load(std::memory_order_relaxed);
             double sentRate = (double)(curSent - prevSent);
@@ -868,14 +908,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
-        // Header
-        if (!midiAvailable) {
-            ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "ERROR: Windows MIDI Services Runtime is missing.");
-            if (ImGui::Button("Download Windows MIDI Services (x64 Installer)")) {
-                ShellExecuteA(NULL, "open", "https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer", NULL, NULL, SW_SHOWNORMAL);
-            }
-        }
-        ImGui::Separator();
+        // Header Error Messaging for MIDI Services (Moved to Connection Tab)
   
         // Top-right device overlay
         float preTabY = ImGui::GetCursorPosY();
@@ -890,7 +923,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
         if (ImGui::BeginTabBar("Tabs")) {
 
-            // ── Connection Tab ─────────────────────────────────────────────
+            // ΓöÇΓöÇ Connection Tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if (ImGui::BeginTabItem("Connection")) {
                 ImGui::Spacing();
                 bool portsRunning = !g_virtualPortsOut.empty();
@@ -935,9 +968,40 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (disableComSelect) ImGui::EndDisabled();
                 
                 ImGui::Spacing();
-                ImGui::BeginDisabled(isConnected);
-                if (ImGui::Button(isConnected ? "Connected" : "Connect", ImVec2(120, 30)) && midiAvailable && !comPorts.empty()) {
-                    if (!isConnected) ConnectPort();
+                ImGui::BeginDisabled(isConnected || g_isConnecting.load());
+                if (ImGui::Button(isConnected ? "Connected" : "Connect", ImVec2(120, 30)) && !comPorts.empty()) {
+                    if (!isConnected && !g_isConnecting.load()) {
+                        if (g_midiStatus.load() != MidiServiceStatus::AVAILABLE) {
+                            connectionStatus = "Cannot connect: Windows MIDI Service is not responding.";
+                            AddLog(LogSourceType::APP_INFO, "Connection aborted: MIDI Service not available.", colSys);
+                        } else {
+                            g_isConnecting.store(true);
+                            connectionStatus = "Connecting...";
+                            std::thread([&]() {
+                                std::atomic<bool> portOpDone{false};
+                                std::thread worker([&]() {
+                                    ConnectPort();
+                                    portOpDone.store(true);
+                                });
+                                
+                                auto start = std::chrono::steady_clock::now();
+                                while (!portOpDone.load()) {
+                                    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 10) {
+                                        // TIMEOUT - assume MIDI service is hung/broken
+                                        g_midiStatus.store(MidiServiceStatus::NOT_RESPONDING);
+                                        connectionStatus = "Cannot connect: Windows MIDI Service is not responding.";
+                                        AddLog(LogSourceType::APP_INFO, "Connection timed out after 10s (MIDI Service hang).", colSys);
+                                        if (worker.joinable()) worker.detach();
+                                        g_isConnecting.store(false);
+                                        return;
+                                    }
+                                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                                }
+                                if (worker.joinable()) worker.join();
+                                g_isConnecting.store(false);
+                            }).detach();
+                        }
+                    }
                 }
                 ImGui::EndDisabled();
                 
@@ -957,7 +1021,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                if (connectionLost) {
+                
+                // Moved MIDI Service Errors to right under the separator
+                if (g_midiStatus.load() == MidiServiceStatus::NOT_RESPONDING) {
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 1.0f));
+                    ImGui::BeginChild("MidiError", ImVec2(0, ImGui::GetContentRegionAvail().y), true);
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "CRITICAL ERROR: Windows MIDI Service is not responding.");
+                    ImGui::TextWrapped("The Windows MIDI Services process (MidiSrv.exe) appears to be hung. This application will not be able to create virtual MIDI ports.");
+                    ImGui::TextWrapped("RECOMMENDATION: Please restart your computer or stop 'MidiSrv.exe' in Task Manager.");
+                    if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                } else if (connectionLost) {
                     ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "COM port disconnected!");
                 } else {
                     ImGui::TextWrapped("%s", connectionStatus.c_str());
@@ -1005,25 +1080,33 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     ImGui::PopStyleColor(4);
                 }
 
-                // Stop Virtual Ports button — show when not connected but ports are alive
+                // Stop Virtual Ports button ΓÇö show when not connected but ports are alive
                 if (!isConnected && !g_virtualPortsOut.empty()) {
                     ImGui::Spacing();
+                    ImGui::BeginDisabled(g_isConnecting.load());
                     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f, 0.3f, 0.0f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.4f, 0.0f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.5f, 0.2f, 0.0f, 1.0f));
                     if (ImGui::Button("Stop Virtual Ports", ImVec2(-1, 28))) {
-                        g_virtualPortsOut.clear();
-                        g_virtualPortIn.reset();
-                        connectionStatus = "Disconnected.";
-                        AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.", colSys);
+                        g_isConnecting.store(true);
+                        std::thread([&]() {
+                            g_virtualPortsOut.clear();
+                            g_virtualPortIn.reset();
+                            connectionStatus = "Disconnected.";
+                            AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.", colSys);
+                            g_isConnecting.store(false);
+                        }).detach();
                     }
                     ImGui::PopStyleColor(3);
+                    ImGui::EndDisabled();
                 }
+
+                // MIDI Service error block moved up
 
                 ImGui::EndTabItem();
             }
 
-            // ── Debug View Tab ─────────────────────────────────────────────
+            // ΓöÇΓöÇ Debug View Tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if (ImGui::BeginTabItem("Debug View")) {
                 ImGui::Spacing();
                 // Filters Row 1
@@ -1055,7 +1138,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 static bool stopScrollFirstFrame = false;
 
                 if (stopScroll) {
-                    // Just toggled ON — capture frozen snapshot now
+                    // Just toggled ON ΓÇö capture frozen snapshot now
                     if (!stopScrollWasOn) {
                         if (filterChanged || logChanged || cachedSnapshot.empty()) {
                             RebuildSnapshot();
@@ -1086,7 +1169,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     ImGui::InputTextMultiline("##frozenView", (char*)frozenBuffer.c_str(), frozenBuffer.size(), ImVec2(-1, -1), ImGuiInputTextFlags_ReadOnly);
                     ImGui::EndChild();
                 } else {
-                    // Stop scroll turned OFF — resume live view
+                    // Stop scroll turned OFF ΓÇö resume live view
                     if (stopScrollWasOn) {
                         stopScrollWasOn = false;
                         snapshotLogVersion = SIZE_MAX; // force live rebuild
@@ -1124,24 +1207,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     frozenSnapshot.clear();
                 }
             ImGui::SameLine();
-            if (ImGui::Button("Get Synth Info")) {
+            if (ImGui::Button("Get synth info")) {
                 if (g_serialPort && g_serialPort->IsOpen()) {
                     std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
                     g_serialPort->Write(stdId);
-
                     AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), colSys, false, "(Identity Request)");
-
                     {
                         std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
                         g_detectedSynth = "";
                         g_waitingForIdentity = true;
                     }
-                    // Timeout for manual button too
                     std::thread([&]() {
                         Sleep(2000);
                         if (g_waitingForIdentity) {
                             std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
-                            if (g_detectedSynth == "Querying...") g_detectedSynth = "";
+                            if (g_detectedSynth == "") g_detectedSynth = "";
                             g_waitingForIdentity = false;
                         }
                     }).detach();
@@ -1150,11 +1230,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     g_detectedSynth = "Port Closed";
                 }
             }
- 
                 ImGui::EndTabItem();
             }
 
-            // ── Settings Tab ───────────────────────────────────────────────
+            // ΓöÇΓöÇ Settings Tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if (ImGui::BeginTabItem("Settings")) {
                 ImGui::Spacing();
                 
@@ -1221,7 +1300,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     settingsChanged = true;
                 }
 
-                if (ImGui::SliderInt("Debug View Max Lines", &g_maxLogLines, 100, 1000)) {
+                if (ImGui::Checkbox("Query device info at connection", (bool*)&g_autoGetSynthInfo)) {
                     settingsChanged = true;
                 }
                 
@@ -1401,7 +1480,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-// ── Centralized Serial Writing with Multiplexing ──────────────────────────────────
+// ΓöÇΓöÇ Centralized Serial Writing with Multiplexing ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
     if (!g_serialPort || !g_serialPort->IsOpen() || data.empty()) return;
 
@@ -1417,7 +1496,11 @@ void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
         g_lastSentPort.store(portIdx, std::memory_order_relaxed);
         
         // Log the multiplexing byte for visibility (Port Select)
-        AddLog(LogSourceType::APP_INFO, "[Port Select] F5 " + BytesToHex({(uint8_t)portIdx}) + " (Addressing Parts " + std::to_string((portIdx-1)*16+1) + "-" + std::to_string(portIdx*16) + ")", ImVec4(1,1,1,1));
+        std::string logMsg = "[Port Select] F5 " + BytesToHex({ (uint8_t)portIdx });
+        if (showNames) {
+            logMsg += " (Addressing Parts " + std::to_string((portIdx - 1) * 16 + 1) + "-" + std::to_string(portIdx * 16) + ")";
+        }
+        AddLog(LogSourceType::APP_INFO, logMsg, ImVec4(1, 1, 1, 1));
         
         g_serialPort->Write(mux);
         g_bytesSent.fetch_add(mux.size(), std::memory_order_relaxed);
