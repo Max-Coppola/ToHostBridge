@@ -48,3 +48,5 @@ packages/
 
 # Release archives
 *.zip
+# Local instructions
+BUILD_INSTRUCTIONS.md
