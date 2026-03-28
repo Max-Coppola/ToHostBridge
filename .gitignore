@@ -48,4 +48,3 @@ packages/
 
 # Release archives
 *.zip
-!ToHostBridge_CLEAN_origin.zip # specifically allow the original if needed? No, let's keep it simple.
