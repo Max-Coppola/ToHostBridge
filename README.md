@@ -1,4 +1,4 @@
-# MIDI-Serial Bridge
+# ToHost Bridge
 
 A professional solution for controlling legacy Yamaha synthesizers via their "TO HOST" serial port.
 
@@ -12,6 +12,11 @@ This software replaces the aged Yamaha CBX (Serial MIDI) driver for Windows, all
 - **Hardware**: CBX-K1, CBX-K2, and many TO HOST equipped Clavinova/PSR models.
 
 By using the high-speed "TO HOST" port (38,400 baud), this bridge recreates **4 virtual MIDI ports**, providing up to **64 simultaneous MIDI instruments** (4 ports x 16 channels). This level of control is not possible with a standard single-port USB-to-MIDI interface.
+
+## Visual Interface
+![Connection Tab](assets/Connection%20tab.png)
+![Debug Tab](assets/Debug%20tab.png)
+![Settings Tab](assets/Settings%20tab.png)
 
 ## Key Features
 - **64-Channel Control**: Maps 4 virtual MIDI ports to the Yamaha multi-port serial protocol.
@@ -40,10 +45,9 @@ The software configures the port with the following settings required by Yamaha 
 
 ## Getting Started
 1. Install **Windows MIDI Services**:
-   - Visit the [Windows MIDI Services Download Page](https://microsoft.github.io/MIDI/get-latest/).
-   - Navigate to "Get the latest Windows MIDI Services runtime and tools".
+   - Visit the [Windows MIDI Services Download Page](https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer).
    - Download and run the latest x64 installer.
-2. Download the latest release of **MIDI-Serial Bridge** from the GitHub [Releases](https://github.com/yourusername/MidiSerialBridge/releases) page.
+2. Download the latest release of **ToHost Bridge** from the [GitHub Releases](https://github.com/Max-Coppola/ToHostBridge/releases) page.
 3. Select your COM port in the application and you're ready to go!
 
 ---
