@@ -127,7 +127,6 @@ struct LogEntry {
     std::string timestamp; // "[HH:MM:SS.mmm] "
     std::string text;      // body without timestamp
     std::string cmdName;
-    ImVec4 color;
     bool isSync;
     uint64_t seqNum;
 };
@@ -139,7 +138,7 @@ int g_maxLogLines = 500;
 uint64_t g_logSeq = 0;    // global sequence counter
 size_t g_logVersion = 0;  // incremented on every push
 
-void AddLog(LogSourceType source, const std::string& msg, ImVec4 color, bool isSync = false, const std::string& cmdName = "") {
+void AddLog(LogSourceType source, const std::string& msg, bool isSync = false, const std::string& cmdName = "") {
     auto now = std::chrono::system_clock::now();
     auto in_time_t = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -153,7 +152,7 @@ void AddLog(LogSourceType source, const std::string& msg, ImVec4 color, bool isS
 
     std::lock_guard<std::mutex> lock(g_logMutex);
     int idx = (int)source;
-    g_logBySource[idx].push_back({source, timeStr, msg, cmdName, color, isSync, ++g_logSeq});
+    g_logBySource[idx].push_back({source, timeStr, msg, cmdName, isSync, ++g_logSeq});
     ++g_logVersion;
     if ((int)g_logBySource[idx].size() > g_maxLogLines) {
         g_logBySource[idx].pop_front();
@@ -598,16 +597,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
                         bool isSync = (data.size() == 1 && data[0] >= 0xF8);
                         SendToSerial(i, data);
-                        AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), cOut, isSync, GetMidiCommandName(data));
+                        AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
                     });
                 g_virtualPortsOut.push_back(std::move(vport));
-                ::Sleep(100); // Small delay to ensure sequential registration in Windows MIDI Services
+                ::Sleep(150); // Small delay to ensure sequential registration in Windows MIDI Services
             }
             if (g_portInEnabled.load(std::memory_order_relaxed)) {
                 std::wstring inPortName = wBaseName + L" In";
                 g_virtualPortIn = std::make_unique<VirtualMidiPort>(inPortName, nullptr);
             }
-            AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.", colSys);
+            AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
         }
         
         struct MidiParser {
@@ -627,7 +626,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     if (g_transmitSync && g_portInEnabled.load(std::memory_order_relaxed)) {
                         if (g_virtualPortIn) g_virtualPortIn->SendMidi(rt);
                     }
-                    AddLog(LogSourceType::COM_IN_SYNC, "[COM->App] " + BytesToHex(rt), colIn, true, GetMidiCommandName(rt));
+                    AddLog(LogSourceType::COM_IN_SYNC, "[COM->App] " + BytesToHex(rt), true, GetMidiCommandName(rt));
                     continue;
                 }
 
@@ -642,7 +641,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         parser->sysexBuffer.push_back(0xF7);
                         if (g_portInEnabled.load(std::memory_order_relaxed) && g_virtualPortIn) 
                             g_virtualPortIn->SendMidi(parser->sysexBuffer);
-                        AddLog(LogSourceType::COM_IN, "[COM->App] SysEx: " + BytesToHex(parser->sysexBuffer), colIn, false, "System Exclusive");
+                        AddLog(LogSourceType::COM_IN, "[COM->App] SysEx: " + BytesToHex(parser->sysexBuffer), false, "System Exclusive");
                         
                         // Identity Reply: F0 7E [dev] 06 02 43 00 [fMSB] [fLSB] [mMSB] [mLSB] ... F7
                         if (parser->sysexBuffer.size() >= 12 && parser->sysexBuffer[1] == 0x7E && parser->sysexBuffer[3] == 0x06 && parser->sysexBuffer[4] == 0x02 && parser->sysexBuffer[5] == 0x43) {
@@ -697,7 +696,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (expected > 0 && parser->buffer.size() == expected) {
                     if (g_portInEnabled.load(std::memory_order_relaxed) && g_virtualPortIn) 
                         g_virtualPortIn->SendMidi(parser->buffer);
-                    AddLog(LogSourceType::COM_IN, "[COM->App] " + BytesToHex(parser->buffer), colIn, false, GetMidiCommandName(parser->buffer));
+                    AddLog(LogSourceType::COM_IN, "[COM->App] " + BytesToHex(parser->buffer), false, GetMidiCommandName(parser->buffer));
                     parser->buffer.clear();
                 }
             }
@@ -716,7 +715,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             }
             if (g_portInEnabled.load(std::memory_order_relaxed))
                 connMsg << "  " << baseNameStr << " In\n";
-            AddLog(LogSourceType::APP_INFO, "Connected to " + comName + " (" + baseNameStr + ")", colSys);
+            AddLog(LogSourceType::APP_INFO, "Connected to " + comName + " (" + baseNameStr + ")");
             isConnected = true;
             connectionLost = false;
 
@@ -725,7 +724,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 // Auto-trigger Synth Identity Discovery on connect (Immediate)
                 std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
                 g_serialPort->Write(stdId);
-                AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), colSys, false, "(Identity Request)");
+                AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), false, "(Identity Request)");
                 
                 {
                     std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
@@ -747,7 +746,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             SaveSettings(comName, baseNameStr, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
         } else {
             connMsg << "Failed to open " << comName << ". Is it in use?";
-            AddLog(LogSourceType::APP_INFO, "Failed to open " + comName, colSys);
+            AddLog(LogSourceType::APP_INFO, "Failed to open " + comName);
             g_serialPort.reset();
         }
         connectionStatus = connMsg.str();
@@ -800,7 +799,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                                 if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
                                 bool isSync = (data.size() == 1 && data[0] >= 0xF8);
                                 SendToSerial(i, data);
-                                AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), cOut, isSync, GetMidiCommandName(data));
+                                AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
                             });
                         g_virtualPortsOut.push_back(std::move(vport));
                     }
@@ -808,7 +807,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         std::wstring inPortName = wBaseName + L" In";
                         g_virtualPortIn = std::make_unique<VirtualMidiPort>(inPortName, nullptr);
                     }
-                    AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.", colSysCopy);
+                    AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
                 }
 
                 // ΓöÇΓöÇ Auto-connect to COM port ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -859,7 +858,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             double maxRate = (sentRate > recvRate) ? sentRate : recvRate;
             // Calibration: While 38400 baud is 3840 B/s, practical synth processing 
             // and multiplexing overhead make the "struggle" point much lower.
-            double saturationPoint = 800.0; 
+            double saturationPoint = 1500.0; 
             double chargeRaw = (maxRate / saturationPoint) * 100.0;
             prevSent = curSent; prevRecv = curRecv;
             
@@ -880,7 +879,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     isConnected = false;
                     connectionLost = true;
                     g_serialPort.reset();   // close the dead handle cleanly
-                    AddLog(LogSourceType::APP_INFO, "COM port lost: " + activeComName, colSys);
+                    AddLog(LogSourceType::APP_INFO, "COM port lost: " + activeComName);
                     connectionStatus = "COM port disconnected!";
                 }
 
@@ -917,7 +916,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             std::string disp = g_detectedSynth;
             float textWidth = ImGui::CalcTextSize(disp.c_str()).x;
             ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - textWidth - 5.0f);
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "%s", disp.c_str());
+            ImGui::TextColored(lightUI ? ImVec4(0.0f, 0.0f, 0.0f, 1.0f) : ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "%s", disp.c_str());
             ImGui::SetCursorPosY(preTabY);
         }
 
@@ -973,7 +972,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     if (!isConnected && !g_isConnecting.load()) {
                         if (g_midiStatus.load() != MidiServiceStatus::AVAILABLE) {
                             connectionStatus = "Cannot connect: Windows MIDI Service is not responding.";
-                            AddLog(LogSourceType::APP_INFO, "Connection aborted: MIDI Service not available.", colSys);
+                            AddLog(LogSourceType::APP_INFO, "Connection aborted: MIDI Service not available.");
                         } else {
                             g_isConnecting.store(true);
                             connectionStatus = "Connecting...";
@@ -990,7 +989,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                                         // TIMEOUT - assume MIDI service is hung/broken
                                         g_midiStatus.store(MidiServiceStatus::NOT_RESPONDING);
                                         connectionStatus = "Cannot connect: Windows MIDI Service is not responding.";
-                                        AddLog(LogSourceType::APP_INFO, "Connection timed out after 10s (MIDI Service hang).", colSys);
+                                        AddLog(LogSourceType::APP_INFO, "Connection timed out after 10s (MIDI Service hang).");
                                         if (worker.joinable()) worker.detach();
                                         g_isConnecting.store(false);
                                         return;
@@ -1014,7 +1013,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         isConnected = false;
                         connectionLost = false;
                         connectionStatus = "Disconnected (virtual ports still active).";
-                        AddLog(LogSourceType::APP_INFO, "Disconnected from COM port.", colSys);
+                        AddLog(LogSourceType::APP_INFO, "Disconnected from COM port.");
                     }
                 }
 
@@ -1060,7 +1059,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                             }
                             SendToSerial(p, pData);
                         }
-                        AddLog(LogSourceType::APP_INFO, "Sent Panic (All Sound/Notes Off, Reset CC) to all ports/channels.", ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
+                        AddLog(LogSourceType::APP_INFO, "Sent Panic (All Sound/Notes Off, Reset CC) to all ports/channels.");
                     }
                     ImGui::PopStyleColor(4);
 
@@ -1075,7 +1074,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                             std::vector<uint8_t> resetMsg = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7 };
                             SendToSerial(p, resetMsg);
                         }
-                        AddLog(LogSourceType::APP_INFO, "Sent XG System On Reset to all active ports.", ImVec4(0.4f, 0.6f, 1.0f, 1.0f));
+                        AddLog(LogSourceType::APP_INFO, "Sent XG System On Reset to all active ports.");
                     }
                     ImGui::PopStyleColor(4);
                 }
@@ -1093,7 +1092,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                             g_virtualPortsOut.clear();
                             g_virtualPortIn.reset();
                             connectionStatus = "Disconnected.";
-                            AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.", colSys);
+                            AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.");
                             g_isConnecting.store(false);
                         }).detach();
                     }
@@ -1181,7 +1180,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
                     ImGui::BeginChild("LogRegion", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing() * 1.8f), true, ImGuiWindowFlags_HorizontalScrollbar);
                     for (const auto& line : cachedSnapshot) {
-                        ImVec4 drawCol = line.color;
+                        ImVec4 drawCol;
+                        switch (line.source) {
+                            case LogSourceType::APP_INFO:    drawCol = colSys; break;
+                            case LogSourceType::COM_IN:      
+                            case LogSourceType::COM_IN_SYNC: drawCol = colIn; break;
+                            case LogSourceType::APP_OUT_1:   drawCol = colOut[0]; break;
+                            case LogSourceType::APP_OUT_2:   drawCol = colOut[1]; break;
+                            case LogSourceType::APP_OUT_3:   drawCol = colOut[2]; break;
+                            case LogSourceType::APP_OUT_4:   drawCol = colOut[3]; break;
+                            default: drawCol = ImVec4(1,1,1,1); break;
+                        }
+
                         std::string display = showTimestamp ? (line.timestamp + line.text) : line.text;
                         if (showNames && !line.cmdName.empty())
                             ImGui::TextColored(drawCol, "%s %s", display.c_str(), line.cmdName.c_str());
@@ -1211,7 +1221,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (g_serialPort && g_serialPort->IsOpen()) {
                     std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
                     g_serialPort->Write(stdId);
-                    AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), colSys, false, "(Identity Request)");
+                    AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), false, "(Identity Request)");
                     {
                         std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
                         g_detectedSynth = "";
@@ -1269,12 +1279,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         ImGui::GetStyle().Colors[ImGuiCol_ButtonActive] = ImVec4(0.65f, 0.65f, 0.68f, 1.00f);
                         
                         // Switch to High-Contrast Light Mode Defaults
-                        colSys  = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-                        colIn   = ImVec4(0.00f, 0.45f, 0.65f, 1.00f);
-                        colOut[0] = ImVec4(0.70f, 0.00f, 0.00f, 1.00f);
-                        colOut[1] = ImVec4(0.60f, 0.35f, 0.00f, 1.00f);
-                        colOut[2] = ImVec4(0.00f, 0.55f, 0.00f, 1.00f);
-                        colOut[3] = ImVec4(0.45f, 0.00f, 0.65f, 1.00f);
+                        colSys    = ImVec4(0.20f, 0.20f, 0.20f, 1.00f); // Darker gray
+                        colIn     = ImVec4(0.00f, 0.30f, 0.60f, 1.00f); // Deep blue
+                        colOut[0] = ImVec4(0.80f, 0.00f, 0.00f, 1.00f); // Bold red
+                        colOut[1] = ImVec4(0.65f, 0.30f, 0.00f, 1.00f); // Deep orange
+                        colOut[2] = ImVec4(0.00f, 0.50f, 0.00f, 1.00f); // Deep green
+                        colOut[3] = ImVec4(0.50f, 0.00f, 0.50f, 1.00f); // Purple
                     } else {
                         ImGui::StyleColorsDark();
                         // Restore Vibrant Dark Mode Defaults
@@ -1500,7 +1510,7 @@ void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
         if (showNames) {
             logMsg += " (Addressing Parts " + std::to_string((portIdx - 1) * 16 + 1) + "-" + std::to_string(portIdx * 16) + ")";
         }
-        AddLog(LogSourceType::APP_INFO, logMsg, ImVec4(1, 1, 1, 1));
+        AddLog(LogSourceType::APP_INFO, logMsg);
         
         g_serialPort->Write(mux);
         g_bytesSent.fetch_add(mux.size(), std::memory_order_relaxed);
