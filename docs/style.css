@@ -97,6 +97,7 @@ nav {
     line-height: 1.1;
     background: linear-gradient(135deg, #fff 0%, #a0a0b0 100%);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -158,6 +159,21 @@ nav {
     color: var(--text-dim);
     font-weight: 600;
     letter-spacing: 1px;
+}
+
+/* Video Demo */
+.video-demo {
+    padding: 40px 0;
+    text-align: center;
+}
+
+.video-container {
+    max-width: 900px;
+    margin: 0 auto;
+    border-radius: 20px;
+    overflow: hidden;
+    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--glass-border);
 }
 
 /* Features */

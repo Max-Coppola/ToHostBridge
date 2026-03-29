@@ -43,19 +43,30 @@ The software configures the port with the following settings required by Yamaha 
 > [!TIP]
 > For the best experience, set your USB Serial Port's **Latency Timer** to **1ms** in the Windows Device Manager (under Port Settings -> Advanced).
 
-## Getting Started
-1. Install **Windows MIDI Services**:
-   - Visit the [Windows MIDI Services Download Page](https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer).
-   - Download and run the latest x64 installer.
-2. Download the latest release of **ToHost Bridge** from the [GitHub Releases](https://github.com/Max-Coppola/ToHostBridge/releases) page.
-3. Select your COM port in the application and you're ready to go!
+## Troubleshooting: Smart App Control / Windows Defender
+Because ToHost Bridge is an open-source project and is not digitally signed with an EV certificate, Windows may flag it as "unrecognized" or "potentially dangerous" via **Smart App Control**.
 
----
-## License & Distribution
-This software is provided for **free** under the **MIT License**.
-- It is and will always be open-source.
-- **It cannot be sold.**
-- You are free to use, modify, and distribute it, provided the original copyright and license notice are included.
+If you see a blue "Windows protected your PC" window:
+1. Click **More info**.
+2. Click **Run anyway**.
+
+The application is safe and open-source. For maximum transparency, you can always build the application yourself from the source code provided here.
+
+## Requirements
+- **Windows 10/11 x64**
+- **Windows MIDI Services (WMS) Runtime**: [Download here](https://microsoft.github.io/MIDI/get-latest/)
+- A compatible Serial-to-USB or Serial-to-Serial cable for the Yamaha TO HOST port.
+- Yamaha MU-series, CS-series, or any XG synth with a TO HOST port.
+
+## Port Mapping (Multiplexing)
+ToHost Bridge enables **4 virtual ports** (64 MIDI channels) over a single serial connection:
+- **CBX Out 1**: Parts 1-16
+- **CBX Out 2**: Parts 17-32
+- **CBX Out 3**: Parts 33-48
+- **CBX Out 4**: Parts 49-64
+
+## License
+MIT License - Open for all. Created by Max Coppola.
 
 ---
 *Created with ❤️ for the Yamaha XG community.*
