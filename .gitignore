@@ -8,7 +8,6 @@ nuget.exe
 *.nupkg
 *.user
 *.ini
-!releases/settings.ini.template
 *.log
 *.exe
 !releases/*.exe
@@ -30,29 +29,10 @@ build_msix_verbose.log
 *.sln.xml
 .cache/
 out/
-x64/
-31: x86/
-32: ARM/
-33: ARM64/
-35: Debug/
-36: Release/
-37: ipch/
-38: *.aps
-39: *.ncb
-40: *.opendb
-41: *.sdf
-42: *.suo
-43: *.user
-44: *.userosscache
-45: *.sln.docstates
-46: *.wixobj
-47: *.wixpdb
-48: *.msi
-49: !releases/*.msi
-!releases/*.msix
+
 
 # Local development test tools
-!test_tool/
+test_tool/
 test_tool/build_test/
 test_tool/*.exe
 
@@ -64,5 +44,5 @@ packages/
 *.zip
 
 # Local instructions (Included)
-!BUILD_INSTRUCTIONS.md
-!STORE_SUBMISSION.md
+BUILD_INSTRUCTIONS.md
+STORE_SUBMISSION.md
