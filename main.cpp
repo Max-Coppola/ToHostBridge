@@ -971,29 +971,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             g_autoStartAttempted.store(true);
             std::string baseNameStr(baseNameBuf);
             std::thread([&, baseNameStr]() {
-                AddLog(LogSourceType::APP_INFO, "MIDI Service became available. Auto-starting virtual ports...");
-                std::wstring wBaseName(baseNameStr.begin(), baseNameStr.end());
-                for (int i = 1; i <= 4; ++i) {
-                    if (!g_portEnabled[i-1].load(std::memory_order_relaxed)) continue;
-                    std::wstring portName = wBaseName + L" Out " + std::to_wstring(i);
-                    LogSourceType srcType = (LogSourceType)((int)LogSourceType::APP_OUT_1 + (i-1));
-                    auto vport = std::make_unique<VirtualMidiPort>(portName,
-                        [i, srcType](const std::vector<uint8_t>& data) {
-                            if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
-                            SendToSerial(i, data);
-                            AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), (data.size() == 1 && data[0] >= 0xF8), GetMidiCommandName(data));
-                        });
-                    g_virtualPortsOut.push_back(std::move(vport));
-                    ::Sleep(150);
-                }
-                if (g_portInEnabled.load(std::memory_order_relaxed)) {
-                    g_virtualPortIn = std::make_unique<VirtualMidiPort>(wBaseName + L" In", nullptr);
-                }
-                AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
-                // Trigger auto-connect for the COM port now that virtual ports are ready
+                AddLog(LogSourceType::APP_INFO, "MIDI Service became available. Triggering auto-start...");
+                // Note: ConnectPort() called by the main loop will handle creating 
+                // the virtual ports once it sees connectionLost set to true below.
                 if (autoStartVirtualMidi) {
                     connectionLost.store(true);
                 }
+                g_autoStartAttempted.store(true);
             }).detach();
         }
 
@@ -1039,7 +1023,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         g_shutdownSubStatus = "Closing " + pName + "...";
                         g_virtualPortsOut[i].reset();
                         g_shutdownSubStatus = "Closing " + pName + "... Done";
-                        ::Sleep(150);
+                        ::Sleep(60);
                     }
                     g_virtualPortsOut.clear();
 
@@ -1048,14 +1032,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         g_shutdownSubStatus = "Closing " + pName + "...";
                         g_virtualPortIn.reset();
                         g_shutdownSubStatus = "Closing " + pName + "... Done";
-                        ::Sleep(150);
+                        ::Sleep(60);
                     }
                     
                     g_shutdownSubStatus = "Finalizing hardware connection...";
                     g_serialPort.reset();
                     g_shutdownSubStatus = "Shutdown complete.";
                     
-                    ::Sleep(500); 
+                    ::Sleep(200); 
                     g_readyToExit.store(true);
                 }).detach();
             }
@@ -1189,6 +1173,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
                     ImGui::EndChild();
                     ImGui::PopStyleColor();
+                } else if (g_isConnecting.load()) {
+                    ImGui::TextWrapped("Connecting...");
                 } else if (connectionLost.load()) {
                     ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "COM port disconnected!");
                 } else {
