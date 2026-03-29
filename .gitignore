@@ -16,6 +16,15 @@ nuget.exe
 *.ilk
 *.exp
 *.lib
+# Assets
+app.png
+app.svg
+msix/cert_thumbprint.txt
+msix/layout/
+msix/ToHostBridgeDev.pfx
+build_msi.log
+build_msix.log
+build_msix_verbose.log
 *.sln.xml
 .cache/
 out/

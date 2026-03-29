@@ -42,4 +42,5 @@ target_link_libraries(ToHostBridge
     PRIVATE windowsapp
     PRIVATE d3d11
     PRIVATE d3dcompiler
+    PRIVATE shell32
 )
