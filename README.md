@@ -3,7 +3,7 @@
 A professional solution for controlling legacy Yamaha synthesizers via their "TO HOST" serial port.
 
 ## Overview
-This software replaces the aged Yamaha CBX (Serial MIDI) driver for Windows, allowing modern PCs to take full control of Yamaha synthesizers via the serial "TO HOST" port. It is fully compatible with both 16-part instruments and multi-port behemoths, including:
+This software replaces the 32-bit Yamaha CBX (Serial MIDI) driver for Windows, allowing modern PCs to take full control of Yamaha synthesizers via the serial "TO HOST" port. It is fully compatible with both 16-part instruments and multi-port synths, including:
 
 - **MU Series**: MU2000, MU1000, MU128, MU100, MU90, MU80, MU50, MU15, MU10, MU5
 - **QY Series**: QY100, QY70
@@ -30,7 +30,7 @@ By using the high-speed "TO HOST" port (38,400 baud), this bridge recreates **4 
 ## Hardware Requirements
 To connect your PC to the synth's "TO HOST" port, you need a **USB-to-Serial Mini-DIN 8-pin cable**.
 - **FTDI-based cables**: Highly recommended for the best update rate and minimum note drops.
-- **Prolific cables**: Fully tested and supported.
+- **Prolific cables**: Tested and supported.
 
 ## COM Port Configuration
 The software configures the port with the following settings required by Yamaha synths:
@@ -43,20 +43,15 @@ The software configures the port with the following settings required by Yamaha 
 > [!TIP]
 > For the best experience, set your USB Serial Port's **Latency Timer** to **1ms** in the Windows Device Manager (under Port Settings -> Advanced).
 
-## Troubleshooting: Smart App Control / Windows Defender
-Because ToHost Bridge is an open-source project and is not digitally signed with an EV certificate, Windows may flag it as "unrecognized" or "potentially dangerous" via **Smart App Control**.
 
-If you see a blue "Windows protected your PC" window:
-1. Click **More info**.
-2. Click **Run anyway**.
+## Getting Started
+1. Install **Windows MIDI Services**:
+   - Visit the [Windows MIDI Services Download Page](https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer).
+   - Navigate to "Get the latest Windows MIDI Services runtime and tools".
+   - Download and run the latest x64 installer.
+2. Download the latest release of **MIDI-Serial Bridge** from the GitHub [Releases](https://github.com/yourusername/MidiSerialBridge/releases) page.
+3. Select your COM port in the application and you're ready to go!
 
-The application is safe and open-source. For maximum transparency, you can always build the application yourself from the source code provided here.
-
-## Requirements
-- **Windows 10/11 x64**
-- **Windows MIDI Services (WMS) Runtime**: [Download here](https://microsoft.github.io/MIDI/get-latest/)
-- A compatible Serial-to-USB or Serial-to-Serial cable for the Yamaha TO HOST port.
-- Yamaha MU-series, CS-series, or any XG synth with a TO HOST port.
 
 ## Port Mapping (Multiplexing)
 ToHost Bridge enables **4 virtual ports** (64 MIDI channels) over a single serial connection:
