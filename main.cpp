@@ -16,6 +16,7 @@
 #include <chrono>
 
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.ApplicationModel.h>
 #include <winmidi/init/Microsoft.Windows.Devices.Midi2.Initialization.hpp>
 
 #include "SerialPort.h"
@@ -24,6 +25,8 @@
 void SendToSerial(int portIdx, const std::vector<uint8_t>& data);
 
 #include <shellapi.h>
+#include <shlobj.h>
+#include <appmodel.h>
 
 #define WM_TRAYICON (WM_APP + 1)
 #define IDI_ICON1 101
@@ -32,6 +35,11 @@ NOTIFYICONDATAW g_nid = {};
 // Global config
 bool g_reduceToTray  = false;
 bool g_transmitSync  = true;
+std::atomic<bool> g_isShuttingDown{false};
+std::atomic<bool> g_cleanupStarted{false};
+std::atomic<bool> g_autoStartAttempted{false};
+std::atomic<bool> g_readyToExit{false};
+std::string g_shutdownSubStatus = "";
 
 // Data
 static ID3D11Device*            g_pd3dDevice = nullptr;
@@ -234,7 +242,24 @@ std::vector<std::string> GetAvailableComPorts() {
 }
 
 // Configuration persistence
+bool IsPackagedProcess() {
+    UINT32 length = 0;
+    LONG result = GetCurrentPackageFullName(&length, NULL);
+    return result == ERROR_INSUFFICIENT_BUFFER;
+}
+
 std::string GetIniPathDir() {
+    if (IsPackagedProcess()) {
+        PWSTR path = NULL;
+        if (SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &path) == S_OK) {
+            std::wstring ws(path);
+            CoTaskMemFree(path);
+            std::string s(ws.begin(), ws.end());
+            s += "\\ToHostBridge";
+            CreateDirectoryA(s.c_str(), NULL);
+            return s;
+        }
+    }
     char path[MAX_PATH];
     GetModuleFileNameA(NULL, path, MAX_PATH);
     std::string s(path);
@@ -344,6 +369,34 @@ void LoadSettings(std::string& comName, char* baseName, bool& autoStart, bool& s
 }
 
 void SetStartWithWindowsRegistry(bool enable) {
+    if (IsPackagedProcess()) {
+        try {
+            // For Store/MSIX, we use the StartupTask API instead of the Registry
+            auto task = winrt::Windows::ApplicationModel::StartupTask::GetAsync(L"ToHostBridgeStartup").get();
+            auto state = task.State();
+
+            if (enable) {
+                if (state != winrt::Windows::ApplicationModel::StartupTaskState::Enabled) {
+                    auto result = task.RequestEnableAsync().get();
+                    if (result == winrt::Windows::ApplicationModel::StartupTaskState::DisabledByUser) {
+                        AddLog(LogSourceType::APP_INFO, "[Startup] Task is DISABLED in Task Manager. Please enable it manually.");
+                    } else if (result == winrt::Windows::ApplicationModel::StartupTaskState::Enabled) {
+                        AddLog(LogSourceType::APP_INFO, "[Startup] Task enabled successfully.");
+                    } else {
+                        AddLog(LogSourceType::APP_INFO, "[Startup] Could not enable task. Status: " + std::to_string((int)result));
+                    }
+                }
+            } else {
+                task.Disable();
+                AddLog(LogSourceType::APP_INFO, "[Startup] Task disabled.");
+            }
+        } catch (...) {
+            // Log or ignore WinRT errors
+            AddLog(LogSourceType::APP_INFO, "Error setting Store startup task.");
+        }
+        return;
+    }
+
     HKEY hKey;
     if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
         if (enable) {
@@ -494,11 +547,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     }
     
     // Auto start to system tray check
-    if (startToTray) {
+    if (startToTray || startMinimized) {
         ::Shell_NotifyIconW(NIM_ADD, &g_nid);
         ::ShowWindow(hwnd, SW_HIDE);
-    } else if (startMinimized) {
-        ::ShowWindow(hwnd, SW_SHOWMINIMIZED);
     } else {
         ::ShowWindow(hwnd, SW_SHOWDEFAULT);
     }
@@ -507,13 +558,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     if (comPortsVec.size() > 0 && selectedComPort >= (int)comPortsVec.size()) selectedComPort = 0;
 
     bool isConnected = false;
-    bool connectionLost = false;
-    std::string activeComName = "";
+    std::atomic<bool> connectionLost{false};
+    std::string activeComName = savedComName;
     std::string connectionStatus = "";
 
     // Startup: if saved port not present yet, mark as waiting
     if (autoStartVirtualMidi && !savedComName.empty() && !foundSavedPort) {
-        connectionLost = true;
+        connectionLost.store(true);
         activeComName = savedComName;
         connectionStatus = "Waiting for " + savedComName + "...";
     }
@@ -576,8 +627,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     };
 
     // Pre-declare lambda for Connect
-    auto ConnectPort = [&]() {
-        if (isConnected || comPorts.empty() || g_midiStatus.load() != MidiServiceStatus::AVAILABLE) return;
+    auto ConnectPort = [&]() -> bool {
+        if (isConnected || g_midiStatus.load() != MidiServiceStatus::AVAILABLE) return false;
+        if (comPorts.empty()) return false;
         std::string baseNameStr(baseNameBuf);
         g_serialPort.reset();
 
@@ -744,17 +796,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
             // Persist the newly-connected COM port name to settings
             SaveSettings(comName, baseNameStr, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
+            connectionStatus = connMsg.str();
+            return true;
         } else {
             connMsg << "Failed to open " << comName << ". Is it in use?";
             AddLog(LogSourceType::APP_INFO, "Failed to open " + comName);
             g_serialPort.reset();
+            connectionStatus = connMsg.str();
+            return false;
         }
-        connectionStatus = connMsg.str();
     };
 
     bool firstFrame = true;
     bool done = false;
-    while (!done)
+    while (!done && !g_readyToExit.load())
     {
         MSG msg;
         while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE))
@@ -764,7 +819,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             if (msg.message == WM_QUIT)
                 done = true;
         }
-        if (done) break;
+        if (done || g_readyToExit.load()) break;
 
         // First frame: start virtual ports in background, then optionally connect
         if (firstFrame) {
@@ -825,6 +880,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         ConnectPort(); // no saved name, connect to first
                     }
                 }
+                g_autoStartAttempted.store(true); // Ensure flag is set even if not started
             }).detach();
         }
 
@@ -877,24 +933,31 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 // Detect sudden disconnect
                 if (isConnected && !portExists) {
                     isConnected = false;
-                    connectionLost = true;
+                    connectionLost.store(true);
                     g_serialPort.reset();   // close the dead handle cleanly
                     AddLog(LogSourceType::APP_INFO, "COM port lost: " + activeComName);
                     connectionStatus = "COM port disconnected!";
                 }
 
-                // Auto-reconnect when port reappears
-                if (!isConnected && connectionLost && portExists && autoReconnect) {
+                // Auto-reconnect when port reappears (triggered by either drop recovery or initial auto-start wait)
+                if (!isConnected && connectionLost.load() && portExists && (autoReconnect || autoStartVirtualMidi)) {
                     // Rebuild port list so dropdown + index are correct
                     comPortsVec = GetAvailableComPorts();
                     comPorts.clear();
                     for (const auto& p : comPortsVec) comPorts.push_back(p.c_str());
-                    if (comPortsVec.size() > 0 && selectedComPort >= (int)comPortsVec.size()) selectedComPort = 0;
+                    
+                    // Match by name
                     for (int i = 0; i < (int)comPortsVec.size(); ++i) {
                         if (comPortsVec[i] == activeComName) { selectedComPort = i; break; }
                     }
-                    connectionLost = false;
-                    ConnectPort();
+                    
+                    if (ConnectPort()) {
+                        connectionLost.store(false);
+                    } else {
+                        // If it fails (e.g. port just appeared but not yet ready),
+                        // we keep connectionLost=true so we retry next second.
+                        connectionStatus = "Waiting for " + activeComName + " (retrying)...";
+                    }
                 }
             }
         }
@@ -903,9 +966,103 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(io.DisplaySize);
-        ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+        // Late MIDI Init Watcher: If service became available and autostart is on, trigger it
+        if (!g_autoStartAttempted.load() && autoStartVirtualMidi && g_midiStatus.load() == MidiServiceStatus::AVAILABLE && g_virtualPortsOut.empty() && !g_virtualPortIn) {
+            g_autoStartAttempted.store(true);
+            std::string baseNameStr(baseNameBuf);
+            std::thread([&, baseNameStr]() {
+                AddLog(LogSourceType::APP_INFO, "MIDI Service became available. Auto-starting virtual ports...");
+                std::wstring wBaseName(baseNameStr.begin(), baseNameStr.end());
+                for (int i = 1; i <= 4; ++i) {
+                    if (!g_portEnabled[i-1].load(std::memory_order_relaxed)) continue;
+                    std::wstring portName = wBaseName + L" Out " + std::to_wstring(i);
+                    LogSourceType srcType = (LogSourceType)((int)LogSourceType::APP_OUT_1 + (i-1));
+                    auto vport = std::make_unique<VirtualMidiPort>(portName,
+                        [i, srcType](const std::vector<uint8_t>& data) {
+                            if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
+                            SendToSerial(i, data);
+                            AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), (data.size() == 1 && data[0] >= 0xF8), GetMidiCommandName(data));
+                        });
+                    g_virtualPortsOut.push_back(std::move(vport));
+                    ::Sleep(150);
+                }
+                if (g_portInEnabled.load(std::memory_order_relaxed)) {
+                    g_virtualPortIn = std::make_unique<VirtualMidiPort>(wBaseName + L" In", nullptr);
+                }
+                AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
+                // Trigger auto-connect for the COM port now that virtual ports are ready
+                if (autoStartVirtualMidi) {
+                    connectionLost.store(true);
+                }
+            }).detach();
+        }
+
+        if (g_isShuttingDown.load()) {
+            // Full-screen "Closing" overlay
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(io.DisplaySize);
+            ImGui::Begin("ShutdownOverlay", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav);
+            
+            float centerX = io.DisplaySize.x * 0.5f;
+            float centerY = io.DisplaySize.y * 0.5f;
+            const char* msg = "Closing virtual ports...";
+            ImVec2 txtSz = ImGui::CalcTextSize(msg);
+            ImGui::SetCursorPos(ImVec2(centerX - txtSz.x * 0.5f, centerY - txtSz.y * 0.5f));
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", msg);
+
+            if (!g_shutdownSubStatus.empty()) {
+                ImVec2 subSz = ImGui::CalcTextSize(g_shutdownSubStatus.c_str());
+                ImGui::SetCursorPos(ImVec2(centerX - subSz.x * 0.5f, centerY + txtSz.y + 10));
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", g_shutdownSubStatus.c_str());
+            }
+
+            if (!g_cleanupStarted.load()) {
+                g_cleanupStarted.store(true);
+                std::thread([&]() {
+                    // Graceful cleanup
+                    // Silence all channels first
+                    if (isConnected && g_serialPort && g_serialPort->IsOpen()) {
+                        for (int p = 1; p <= 4; ++p) {
+                            std::vector<uint8_t> quiet;
+                            for (int ch = 0; ch < 16; ++ch) {
+                                quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
+                            }
+                            quiet.push_back(0xFC); // MIDI Stop
+                            SendToSerial(p, quiet);
+                        }
+                    }
+                    
+                    std::string baseNm(baseNameBuf);
+                    // Close output ports one by one
+                    for (int i = 0; i < (int)g_virtualPortsOut.size(); ++i) {
+                        std::string pName = baseNm + " Out " + std::to_string(i + 1);
+                        g_shutdownSubStatus = "Closing " + pName + "...";
+                        g_virtualPortsOut[i].reset();
+                        g_shutdownSubStatus = "Closing " + pName + "... Done";
+                        ::Sleep(150);
+                    }
+                    g_virtualPortsOut.clear();
+
+                    if (g_virtualPortIn) {
+                        std::string pName = baseNm + " In";
+                        g_shutdownSubStatus = "Closing " + pName + "...";
+                        g_virtualPortIn.reset();
+                        g_shutdownSubStatus = "Closing " + pName + "... Done";
+                        ::Sleep(150);
+                    }
+                    
+                    g_shutdownSubStatus = "Finalizing hardware connection...";
+                    g_serialPort.reset();
+                    g_shutdownSubStatus = "Shutdown complete.";
+                    
+                    ::Sleep(500); 
+                    g_readyToExit.store(true);
+                }).detach();
+            }
+        } else {
+            ImGui::SetNextWindowPos(ImVec2(0, 0));
+            ImGui::SetNextWindowSize(io.DisplaySize);
+            ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
 
         // Header Error Messaging for MIDI Services (Moved to Connection Tab)
   
@@ -965,9 +1122,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 ImGui::SetNextItemWidth(120);
                 ImGui::Combo("COM Port", &selectedComPort, comPorts.empty() ? nullptr : comPorts.data(), (int)comPorts.size());
                 if (disableComSelect) ImGui::EndDisabled();
-                
+
                 ImGui::Spacing();
-                ImGui::BeginDisabled(isConnected || g_isConnecting.load());
+                bool disableConnect = isConnected || g_isConnecting.load() || g_midiStatus.load() != MidiServiceStatus::AVAILABLE;
+                ImGui::BeginDisabled(disableConnect);
                 if (ImGui::Button(isConnected ? "Connected" : "Connect", ImVec2(120, 30)) && !comPorts.empty()) {
                     if (!isConnected && !g_isConnecting.load()) {
                         if (g_midiStatus.load() != MidiServiceStatus::AVAILABLE) {
@@ -1011,7 +1169,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         g_serialPort.reset();
                         g_lastSentPort.store(0, std::memory_order_relaxed);
                         isConnected = false;
-                        connectionLost = false;
+                        connectionLost.store(false);
                         connectionStatus = "Disconnected (virtual ports still active).";
                         AddLog(LogSourceType::APP_INFO, "Disconnected from COM port.");
                     }
@@ -1031,7 +1189,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
                     ImGui::EndChild();
                     ImGui::PopStyleColor();
-                } else if (connectionLost) {
+                } else if (connectionLost.load()) {
                     ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "COM port disconnected!");
                 } else {
                     ImGui::TextWrapped("%s", connectionStatus.c_str());
@@ -1353,6 +1511,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             ImGui::EndTabBar();
         }
 
+        }
         ImGui::End();
 
         // Rendering
@@ -1479,6 +1638,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
         }
         return 0;
+    case WM_CLOSE:
+        if (!g_isShuttingDown.load()) {
+            g_isShuttingDown.store(true);
+        }
+        return 0; // Always return 0 to prevent DefWindowProc from closing the window immediately
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
         break;
