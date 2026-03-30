@@ -59,13 +59,21 @@ VirtualMidiPort::VirtualMidiPort(const std::wstring& portName, MidiRxCallback rx
 
 VirtualMidiPort::~VirtualMidiPort() {
     m_isClosing = true;
-    if (m_connection) {
-        if (m_messageReceivedToken) {
-            m_connection.MessageReceived(m_messageReceivedToken);
+    try {
+        if (m_connection) {
+            if (m_messageReceivedToken) {
+                m_connection.MessageReceived(m_messageReceivedToken);
+                m_messageReceivedToken = { 0 };
+            }
+            m_connection = nullptr;
         }
-    }
-    if (m_session) {
-        m_session.Close();
+        if (m_session) {
+            m_session.Close();
+            m_session = nullptr;
+        }
+        m_virtualDevice = nullptr;
+    } catch (...) {
+        // Suppress any errors during shutdown to prevent crashes
     }
 }
 

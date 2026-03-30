@@ -1,0 +1,7 @@
+feat: ToHost Bridge v1.2.0 - Optimized Shutdown & Reliability
+-   Implemented Shutdown Checklist UI for real-time cleanup progress.
+-   Refactored VirtualMidiPort cleanup to eliminate hangs.
+-   Optimized shutdown sequence with staggered parallel port closures (1000ms offset).
+-   Added "Double-Click to Hide" exit logic (WM_CLOSE hides window while cleanup continues).
+-   Bumped version to v1.2.0 across all manifests and build scripts.
+-   Updated MSI and MSIX packaging for v1.2.0.
