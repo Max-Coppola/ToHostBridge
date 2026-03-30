@@ -40,6 +40,9 @@ std::atomic<bool> g_cleanupStarted{false};
 std::atomic<bool> g_autoStartAttempted{false};
 std::atomic<bool> g_readyToExit{false};
 std::string g_shutdownSubStatus = "";
+struct ShutdownTask { std::string name; std::string status; };
+std::vector<ShutdownTask> g_shutdownTasks;
+std::mutex g_shutdownMutex;
 
 // Data
 static ID3D11Device*            g_pd3dDevice = nullptr;
@@ -461,7 +464,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), nullptr, nullptr, nullptr, L"ToHostBridge", LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) };
     ::RegisterClassExW(&wc);
     // Adjusted window dimensions for bold headers and better spacing
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.1.0", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.2.0", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hwnd;
@@ -989,55 +992,101 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             
             float centerX = io.DisplaySize.x * 0.5f;
             float centerY = io.DisplaySize.y * 0.5f;
-            const char* msg = "Closing virtual ports...";
-            ImVec2 txtSz = ImGui::CalcTextSize(msg);
-            ImGui::SetCursorPos(ImVec2(centerX - txtSz.x * 0.5f, centerY - txtSz.y * 0.5f));
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", msg);
+            
+            // Move everything higher (Start higher than center)
+            float currentY = centerY - 100.0f;
 
-            if (!g_shutdownSubStatus.empty()) {
-                ImVec2 subSz = ImGui::CalcTextSize(g_shutdownSubStatus.c_str());
-                ImGui::SetCursorPos(ImVec2(centerX - subSz.x * 0.5f, centerY + txtSz.y + 10));
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", g_shutdownSubStatus.c_str());
+            const char* msg = "Finalizing ToHost Bridge...";
+            ImVec2 txtSz = ImGui::CalcTextSize(msg);
+            ImGui::SetCursorPos(ImVec2(centerX - txtSz.x * 0.5f, currentY));
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", msg);
+            currentY += 40;
+
+            if (!g_shutdownTasks.empty()) {
+                std::lock_guard<std::mutex> lock(g_shutdownMutex);
+                float listWidth = 280.0f * (io.DisplaySize.x / 530.0f); 
+                float startX = centerX - listWidth * 0.5f;
+
+                for (const auto& task : g_shutdownTasks) {
+                    ImVec4 color = (task.status == "OK") ? ImVec4(0.4f, 1.0f, 0.4f, 1.0f) : (task.status == "..." ? ImVec4(1.0f, 1.0f, 0.0f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                    
+                    // Task Name (Left-column)
+                    ImGui::SetCursorPos(ImVec2(startX, currentY));
+                    ImGui::Text("%s", task.name.c_str());
+                    
+                    // Status (Right-column, attracted to the left of its column)
+                    ImGui::SetCursorPos(ImVec2(startX + 190.0f, currentY));
+                    ImGui::TextColored(color, "%s", task.status.c_str());
+                    
+                    currentY += 25;
+                }
             }
 
             if (!g_cleanupStarted.load()) {
                 g_cleanupStarted.store(true);
                 std::thread([&]() {
-                    // Graceful cleanup
-                    // Silence all channels first
+                    // Initialize tasks
+                    {
+                        std::lock_guard<std::mutex> lock(g_shutdownMutex);
+                        g_shutdownTasks.push_back({"Silence hardware", "..."});
+                        for (int i = 0; i < (int)g_virtualPortsOut.size(); i++) 
+                            g_shutdownTasks.push_back({"Close Virtual Out " + std::to_string(i+1), "Pending"});
+                        if (g_virtualPortIn) g_shutdownTasks.push_back({"Close Virtual In", "Pending"});
+                        g_shutdownTasks.push_back({"Finalize connection", "Pending"});
+                    }
+
+                    // 1. Silence serial synths
                     if (isConnected && g_serialPort && g_serialPort->IsOpen()) {
                         for (int p = 1; p <= 4; ++p) {
                             std::vector<uint8_t> quiet;
-                            for (int ch = 0; ch < 16; ++ch) {
-                                quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
-                            }
+                            for (int ch = 0; ch < 16; ++ch) quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
                             quiet.push_back(0xFC); // MIDI Stop
                             SendToSerial(p, quiet);
                         }
                     }
+                    { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[0].status = "OK"; }
                     
-                    std::string baseNm(baseNameBuf);
-                    // Close output ports one by one
-                    for (int i = 0; i < (int)g_virtualPortsOut.size(); ++i) {
-                        std::string pName = baseNm + " Out " + std::to_string(i + 1);
-                        g_shutdownSubStatus = "Closing " + pName + "...";
-                        g_virtualPortsOut[i].reset();
-                        g_shutdownSubStatus = "Closing " + pName + "... Done";
-                        ::Sleep(60);
-                    }
-                    g_virtualPortsOut.clear();
-
+                    // 2. Send MIDI Stop to Virtual Input (if exists)
                     if (g_virtualPortIn) {
-                        std::string pName = baseNm + " In";
-                        g_shutdownSubStatus = "Closing " + pName + "...";
-                        g_virtualPortIn.reset();
-                        g_shutdownSubStatus = "Closing " + pName + "... Done";
-                        ::Sleep(60);
+                        g_virtualPortIn->SendMidi({ 0xFC });
+                    }
+
+                    // 3. Parallel-ish Close with 100ms stagger
+                    std::vector<std::thread> cleanThreads;
+                    
+                    // Launch Output Port Closures
+                    for (int i = 0; i < (int)g_virtualPortsOut.size(); ++i) {
+                        int taskIdx = i + 1;
+                        cleanThreads.emplace_back([this, i, taskIdx]() {
+                            { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "..."; }
+                            g_virtualPortsOut[i].reset();
+                            { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "OK"; }
+                        });
+                        ::Sleep(1000); // 1s stagger between STARTING each port closure
                     }
                     
-                    g_shutdownSubStatus = "Finalizing hardware connection...";
+                    // Launch Input Port Closure
+                    if (g_virtualPortIn) {
+                        int taskIdx = (int)g_shutdownTasks.size() - 2;
+                        cleanThreads.emplace_back([this, taskIdx]() {
+                            { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "..."; }
+                            g_virtualPortIn.reset();
+                            { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "OK"; }
+                        });
+                        ::Sleep(1000);
+                    }
+                    
+                    // Wait for all port driver cleanup to finish (the "Barrier")
+                    for (auto& t : cleanThreads) {
+                        if (t.joinable()) t.join();
+                    }
+                    g_virtualPortsOut.clear(); 
+                    
+                    // 4. Finalize
+                    int finalIdx = (int)g_shutdownTasks.size() - 1;
+                    { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[finalIdx].status = "..."; }
                     g_serialPort.reset();
-                    g_shutdownSubStatus = "Shutdown complete.";
+                    { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[finalIdx].status = "OK"; }
                     
                     ::Sleep(200); 
                     g_readyToExit.store(true);
@@ -1625,7 +1674,10 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
     case WM_CLOSE:
-        if (!g_isShuttingDown.load()) {
+        if (g_isShuttingDown.load()) {
+            // Second click: Hide the window while cleanup continues in background
+            ::ShowWindow(hWnd, SW_HIDE);
+        } else {
             g_isShuttingDown.store(true);
         }
         return 0; // Always return 0 to prevent DefWindowProc from closing the window immediately

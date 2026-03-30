@@ -1,7 +1,10 @@
+/build/
 build/
 build_test/
+releases/
 bin/
 obj/
+msix/
 .vs/
 packages/
 nuget.exe
@@ -10,12 +13,14 @@ nuget.exe
 *.ini
 *.log
 *.exe
-!releases/*.exe
 *.dll
 *.pdb
 *.ilk
 *.exp
 *.lib
+*.ps1
+*.vbs
+*.msix
 
 # Assets
 app.png
@@ -46,3 +51,14 @@ packages/
 # Local instructions (Included)
 BUILD_INSTRUCTIONS.md
 STORE_SUBMISSION.md
+ 
+# MSIX Signing
+gen_cert.ps1
+*.pfx
+ 
+gen_cert.ps1
+*.pfx
+
+# WiX temporary files
+*.wixobj
+*.wixpdb
