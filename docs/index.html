@@ -1,24 +1,30 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="google-site-verification" content="google4a6a02ea05f53018" />
-    <meta name="keywords" content="Yamaha TO HOST Driver alternative, Yamaha TO HOST Driver windows 10, Yamaha TO HOST Driver windows 11, CBX Driver windows 10, CBX alternative, TO HOST Yamaha windows 10, USB Serial TO HOST Yamaha, MIDI Serial Bridge, Yamaha MU128 Windows 11, Yamaha MU2000 Driver, XG MIDI Serial, Yamaha UX16 alternative, Legacy Yamaha MIDI Driver">
-    <title>ToHost Bridge | Professional Yamaha MIDI Serial Bridge</title>
+    <meta name="keywords"
+        content="Yamaha TO HOST Driver alternative, Yamaha TO HOST Driver windows 10, Yamaha TO HOST Driver windows 11, CBX Driver windows 10, CBX alternative, TO HOST Yamaha windows 10, USB Serial TO HOST Yamaha, MIDI Serial Bridge, Yamaha MU128 Windows 11, Yamaha MU2000 Driver, XG MIDI Serial, Yamaha UX16 alternative, Legacy Yamaha MIDI Driver">
+    <title>ToHost Bridge | The Professional MIDI to Yamaha Serial Bridge</title>
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Outfit:wght@500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Outfit:wght@500;700&display=swap"
+        rel="stylesheet">
 </head>
+
 <body>
     <header>
         <nav>
             <div class="logo">TO<span>HOST</span> BRIDGE</div>
             <div class="links">
+                <a href="#performance">Performance</a>
                 <a href="#features">Features</a>
                 <a href="#screenshots">Gallery</a>
+                <a href="#requirements">Requirements</a>
                 <a href="https://github.com/Max-Coppola/ToHostBridge" class="btn-github">GitHub</a>
             </div>
         </nav>
@@ -26,18 +32,35 @@
 
     <section class="hero">
         <div class="hero-content">
-            <h1>The Professional MIDI to Yamaha Serial Bridge.</h1>
-            <p>ToHost Bridge is free software. Connect your modern Windows PC to legacy Yamaha synthesizers via TO HOST serial ports. High performance, 4-port multiplexing (64 MIDI channels), and full MIDI 2.0 support.</p>
+            <h1>The Ultimate MIDI Bridge for Yamaha Synthesizers</h1>
+            <p>Seamlessly connect your modern Windows PC to legacy Yamaha synthesizers via TO HOST serial ports.<br><br>ToHost Bridge provides high-performance, 64-channel MIDI multiplexing completely free and open source.</p>
             <div class="hero-btns">
-                <a href="https://github.com/Max-Coppola/ToHostBridge/releases/download/v1.1/ToHostBridge.msi" class="btn-primary">Download Installer (.MSI)</a>
-                <a href="https://github.com/Max-Coppola/ToHostBridge/releases/download/v1.1/ToHostBridge.exe" class="btn-secondary btn-small">Download Standalone (.EXE)</a>
+                <a href="https://apps.microsoft.com/detail/9plvb2ngp1xs" class="btn-ms-store">
+                    <svg class="ms-logo" viewBox="0 0 23 23" width="24" height="24">
+                        <path fill="#f35325" d="M1 1h10v10H1z" />
+                        <path fill="#81bc06" d="M12 1h10v10H12z" />
+                        <path fill="#05a6f0" d="M1 12h10v10H1z" />
+                        <path fill="#ffba08" d="M12 12h10v10H12z" />
+                    </svg>
+                    <div class="ms-store-text">
+                        <span class="get-it">Get it from</span>
+                        <span class="ms-store">Microsoft Store</span>
+                    </div>
+                </a>
+                <div class="secondary-btns">
+                    <a href="https://github.com/Max-Coppola/ToHostBridge/releases/download/v1.2/ToHostBridge.msi" class="btn-small">Installer (.MSI)</a>
+                    <a href="https://github.com/Max-Coppola/ToHostBridge/releases/download/v1.2/ToHostBridge.exe" class="btn-small">Standalone (.EXE)</a>
+                </div>
+                <div class="github-note">Standalone and MSI installers are available on GitHub.</div>
             </div>
-            <div class="version">Version 1.1 | Windows 10/11 x64</div>
+            <div class="version">Version 1.2 | Windows 10/11 x64</div>
         </div>
     </section>
 
-    <section class="video-demo">
+    <section id="performance" class="video-demo">
         <div class="container">
+            <h2>ToHost Bridge in Action</h2>
+            <p class="section-subtitle">A quick MIDI demonstration using the Yamaha MU2000 and SOL2.</p>
             <div class="video-container">
                 <iframe width="100%" height="450" src="https://www.youtube.com/embed/8kw8M0D7CXs" title="ToHost Bridge Demo" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
             </div>
@@ -46,25 +69,28 @@
 
     <section id="features" class="features">
         <div class="container">
-            <div class="feature-card">
-                <div class="icon">🎹</div>
-                <h3>4 Virtual Outputs</h3>
-                <p>Multiplex up to 4 virtual MIDI out ports (64 MIDI channels) into a single high-speed serial stream for massive multi-part MU-series setups.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon">⚡</div>
-                <h3>Zero Lag</h3>
-                <p>Highly optimized C++ engine with real-time thread priority ensures rock-solid timing and low latency.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon">🛠️</div>
-                <h3>MIDI 2.0 Ready</h3>
-                <p>Built on the official Microsoft Windows MIDI Services SDK for the best compatibility and performance.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon">📦</div>
-                <h3>Small & Portable</h3>
-                <p>Runs as a single executable or installs via a per-user MSI without admin rights. Stealthy system tray mode included.</p>
+            <h2>Features</h2>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <div class="icon">🎹</div>
+                    <h3>4 Virtual Outputs</h3>
+                    <p>Multiplex up to 4 virtual MIDI out ports (64 MIDI channels) into a single high-speed serial stream for massive multi-part MU-series setups.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="icon">⚡</div>
+                    <h3>Zero Lag</h3>
+                    <p>Highly optimized C++ engine with real-time thread priority ensures rock-solid timing and low latency.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="icon">🛠️</div>
+                    <h3>MIDI 2.0 Ready</h3>
+                    <p>Built on the official Microsoft Windows MIDI Services SDK for the best compatibility and performance.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="icon">📦</div>
+                    <h3>Small & Portable</h3>
+                    <p>Runs as a single executable or installs via a per-user MSI without admin rights. Stealthy system tray mode included.</p>
+                </div>
             </div>
         </div>
     </section>
@@ -89,11 +115,32 @@
         </div>
     </section>
 
-    <section class="requirements">
+    <section id="requirements" class="requirements">
         <div class="container">
-            <h3>Dependencies</h3>
-            <p>ToHost Bridge requires <strong>Windows MIDI Services (WMS)</strong> to be installed on your system.</p>
-            <a href="https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer" class="btn-link">Download WMS Runtime &rarr;</a>
+            <h2>System Dependencies</h2>
+            <p class="section-subtitle">Ensure these essential components are installed for the best experience.</p>
+            <div class="dependency-grid">
+                <div class="dep-card">
+                    <div class="dep-icon">
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent-primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M2 9h20M2 15h20M7 9v6M12 9v6M17 9v6"/><rect x="2" y="5" width="20" height="14" rx="2"/>
+                        </svg>
+                    </div>
+                    <h3>Windows MIDI Services</h3>
+                    <p>The modern MIDI 2.0 backbone for Windows, essential for low-latency virtual ports.</p>
+                    <a href="https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer" class="btn-link" target="_blank" rel="noopener">Official Download &rarr;</a>
+                </div>
+                <div class="dep-card">
+                    <div class="dep-icon">
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#0078d7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                        </svg>
+                    </div>
+                    <h3>Visual C++ Redist</h3>
+                    <p>Microsoft's runtime libraries (2015-2022) required for the core C++ application engine.</p>
+                    <a href="https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/#:~:text=https://aka.ms/vc14/vc_redist.x64.exe" class="btn-link" target="_blank" rel="noopener">Official Download &rarr;</a>
+                </div>
+            </div>
         </div>
     </section>
 
@@ -104,4 +151,5 @@
         </div>
     </footer>
 </body>
+
 </html>

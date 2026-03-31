@@ -49,7 +49,7 @@ The software configures the port with the following settings required by Yamaha 
    - Visit the [Windows MIDI Services Download Page](https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer).
    - Navigate to "Get the latest Windows MIDI Services runtime and tools".
    - Download and run the latest x64 installer.
-2. Download the latest release of **MIDI-Serial Bridge** from the GitHub [Releases](https://github.com/yourusername/MidiSerialBridge/releases) page.
+2. Download the latest release of **ToHost Bridge** from the GitHub [Releases](https://github.com/yourusername/MidiSerialBridge/releases) page.
 3. Select your COM port in the application and you're ready to go!
 
 
