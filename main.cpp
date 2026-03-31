@@ -80,7 +80,7 @@ std::atomic<bool> g_autoGetSynthInfo{true};
 
 enum class MidiServiceStatus { INITIALIZING, AVAILABLE, UNAVAILABLE, NOT_RESPONDING };
 std::atomic<MidiServiceStatus> g_midiStatus{MidiServiceStatus::INITIALIZING};
-bool midiAvailable = false;
+std::atomic<bool> midiAvailable{false};
 
 std::mutex g_synthNameOverlayMutex;
 bool g_waitingForIdentity = false;
@@ -432,13 +432,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     std::thread midiInitThread([]() {
         Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer midiInit;
         bool sdkAvailable = midiInit.InitializeSdkRuntime() && midiInit.EnsureServiceAvailable();
-        bool isInstalled = midiInit.IsServiceInstalled();
         
-        if (sdkAvailable || isInstalled) {
-            midiAvailable = true;
+        if (sdkAvailable) {
+            midiAvailable.store(true);
             g_midiStatus.store(MidiServiceStatus::AVAILABLE);
         } else {
-            midiAvailable = false;
+            midiAvailable.store(false);
             g_midiStatus.store(MidiServiceStatus::UNAVAILABLE);
         }
     });
@@ -449,7 +448,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         while (g_midiStatus.load() == MidiServiceStatus::INITIALIZING) {
             if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 5) {
                 g_midiStatus.store(MidiServiceStatus::NOT_RESPONDING);
-                midiAvailable = false;
+                midiAvailable.store(false);
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -464,7 +463,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), nullptr, nullptr, nullptr, L"ToHostBridge", LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) };
     ::RegisterClassExW(&wc);
     // Adjusted window dimensions for bold headers and better spacing
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.2.0", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.2.1", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hwnd;
@@ -1213,13 +1212,24 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 ImGui::Spacing();
                 
                 // Moved MIDI Service Errors to right under the separator
-                if (g_midiStatus.load() == MidiServiceStatus::NOT_RESPONDING) {
+                MidiServiceStatus currentStatus = g_midiStatus.load();
+                if (currentStatus == MidiServiceStatus::INITIALIZING) {
+                    ImGui::TextWrapped("Checking MIDI Service...");
+                } else if (currentStatus == MidiServiceStatus::NOT_RESPONDING || currentStatus == MidiServiceStatus::UNAVAILABLE) {
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 1.0f));
                     ImGui::BeginChild("MidiError", ImVec2(0, ImGui::GetContentRegionAvail().y), true);
-                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "CRITICAL ERROR: Windows MIDI Service is not responding.");
-                    ImGui::TextWrapped("The Windows MIDI Services process (MidiSrv.exe) appears to be hung. This application will not be able to create virtual MIDI ports.");
-                    ImGui::TextWrapped("RECOMMENDATION: Please restart your computer or stop 'MidiSrv.exe' in Task Manager.");
-                    if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
+                    if (currentStatus == MidiServiceStatus::NOT_RESPONDING) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "CRITICAL ERROR: Windows MIDI Service is not responding.");
+                        ImGui::TextWrapped("The Windows MIDI Services process (MidiSrv.exe) appears to be hung. This application will not be able to create virtual MIDI ports.");
+                        ImGui::TextWrapped("RECOMMENDATION: Please restart your computer or stop 'MidiSrv.exe' in Task Manager.");
+                        if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "ERROR: Windows MIDI Services Runtime is missing.");
+                        ImGui::TextWrapped("ToHost Bridge requires the Windows MIDI Services (MIDI 2.0) runtime for virtual ports and reliable MIDI communication.");
+                        if (ImGui::Button("Download Windows MIDI Services (x64 Installer)")) {
+                            ShellExecuteA(NULL, "open", "https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer", NULL, NULL, SW_SHOWNORMAL);
+                        }
+                    }
                     ImGui::EndChild();
                     ImGui::PopStyleColor();
                 } else if (g_isConnecting.load()) {
