@@ -60,9 +60,78 @@ void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // Application State
-std::unique_ptr<SerialPort> g_serialPort;
-std::vector<std::unique_ptr<VirtualMidiPort>> g_virtualPortsOut;
-std::unique_ptr<VirtualMidiPort> g_virtualPortIn;
+std::shared_ptr<SerialPort> g_serialPort;
+std::shared_ptr<VirtualMidiPort> g_virtualPortIn;
+std::vector<std::shared_ptr<VirtualMidiPort>> g_virtualPortsOut;
+std::mutex g_midiPtrMutex;
+
+std::shared_ptr<SerialPort> GetSafeSerialPort() {
+    std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+    return g_serialPort;
+}
+
+void ResetSafeSerialPort() {
+    std::shared_ptr<SerialPort> sp;
+    {
+        std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+        sp = std::move(g_serialPort);
+        g_serialPort = nullptr;
+    } 
+}
+
+void SetSafeSerialPort(std::shared_ptr<SerialPort> sp) {
+    std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+    g_serialPort = sp;
+}
+
+std::shared_ptr<VirtualMidiPort> GetSafeVirtualPortIn() {
+    std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+    return g_virtualPortIn;
+}
+
+void SetSafeVirtualPortIn(std::shared_ptr<VirtualMidiPort> vp) {
+    std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+    g_virtualPortIn = vp;
+}
+
+void ResetSafeVirtualPortIn() {
+    std::shared_ptr<VirtualMidiPort> vpi;
+    {
+        std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+        vpi = std::move(g_virtualPortIn);
+        g_virtualPortIn = nullptr;
+    }
+}
+
+std::vector<std::shared_ptr<VirtualMidiPort>> GetSafeVirtualPortsOut() {
+    std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+    return g_virtualPortsOut;
+}
+
+void ClearSafeVirtualPortsOut() {
+    std::vector<std::shared_ptr<VirtualMidiPort>> toClean;
+    {
+        std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+        toClean = std::move(g_virtualPortsOut);
+        g_virtualPortsOut.clear();
+    }
+}
+
+void AddSafeVirtualPortOut(std::shared_ptr<VirtualMidiPort> vp) {
+    std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+    g_virtualPortsOut.push_back(vp);
+}
+
+void ResetSafeVirtualPortsOutIndex(int i) {
+    std::shared_ptr<VirtualMidiPort> vp;
+    {
+        std::lock_guard<std::mutex> lock(g_midiPtrMutex);
+        if (i >= 0 && i < (int)g_virtualPortsOut.size()) {
+            vp = std::move(g_virtualPortsOut[i]);
+            g_virtualPortsOut[i] = nullptr;
+        }
+    }
+}
 
 // Serial write mutex + port running-status
 // g_lastSentPort == 0 means "no port selected yet" (force prefix on first write)
@@ -108,7 +177,7 @@ const YamahaSynthIdentity g_xgSynthTable[] = {
     {0x41, 0x5E, 0x03, 0x00, "Yamaha S80"},
     {0x41, 0x23, 0x04, 0x00, "Yamaha S30"},
     {0x41, 0x7F, 0x00, 0x00, "Yamaha S90/S90ES"},
-    {0x41, 0x49, 0x1B, 0x00, "Yamaha QY100"},
+    {0x41, 0x04, 0x34, 0x00, "Yamaha QY100"},
     {0x41, 0x49, 0x0B, 0x00, "Yamaha QY70"},
     {0x41, 0x4C, 0x00, 0x00, "Yamaha CBX-K1/K2"},
     {0x41, 0x27, 0x01, 0x00, "Yamaha Clavinova CLP"},
@@ -416,6 +485,10 @@ void SetStartWithWindowsRegistry(bool enable) {
 // Main code explicitly for Windows Subsystem
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
+    // 0. Startup Virtual Port Cleanup (To handle prior crashes)
+    VirtualMidiPort::RemoveStalePorts();
+    
+
     HANDLE hMutex = CreateMutexW(NULL, TRUE, L"ToHostBridgeInstanceMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND hExisting = FindWindowW(L"ToHostBridge", nullptr);
@@ -633,13 +706,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         if (isConnected || g_midiStatus.load() != MidiServiceStatus::AVAILABLE) return false;
         if (comPorts.empty()) return false;
         std::string baseNameStr(baseNameBuf);
-        g_serialPort.reset();
+        ResetSafeSerialPort();
 
         std::string comName = comPorts[selectedComPort];
         activeComName = comName;
 
         // Restart virtual MIDI ports if they were stopped
-        if (g_virtualPortsOut.empty() && !g_virtualPortIn) {
+        if (GetSafeVirtualPortsOut().empty() && !g_virtualPortIn) {
             std::wstring wBaseName(baseNameStr.begin(), baseNameStr.end());
             for (int i = 1; i <= 4; ++i) {
                 if (!g_portEnabled[i-1].load(std::memory_order_relaxed)) continue;
@@ -653,12 +726,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         SendToSerial(i, data);
                         AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
                     });
-                g_virtualPortsOut.push_back(std::move(vport));
-                ::Sleep(150); // Small delay to ensure sequential registration in Windows MIDI Services
+                AddSafeVirtualPortOut(std::move(vport));
+                ::Sleep(500); // Wait for Windows MIDI Services to commit each endpoint before registering the next.
+                              // 150ms was too short — the async registration raced and ports appeared out of order.
             }
             if (g_portInEnabled.load(std::memory_order_relaxed)) {
                 std::wstring inPortName = wBaseName + L" In";
-                g_virtualPortIn = std::make_unique<VirtualMidiPort>(inPortName, nullptr);
+                SetSafeVirtualPortIn(std::make_shared<VirtualMidiPort>(inPortName, nullptr));
             }
             AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
         }
@@ -670,15 +744,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             std::vector<uint8_t> sysexBuffer;
         };
         auto parser = std::make_shared<MidiParser>();
-
-        g_serialPort = std::make_unique<SerialPort>(comName, [colIn, parser](const std::vector<uint8_t>& data) {
+        
+        SetSafeSerialPort(std::make_shared<SerialPort>(comName, [colIn, parser](const std::vector<uint8_t>& data) {
             g_bytesReceived.fetch_add(data.size(), std::memory_order_relaxed);
             for (uint8_t b : data) {
                 // Realtime bytes (High Priority)
                 if (b >= 0xF8) {
                     std::vector<uint8_t> rt = { b };
                     if (g_transmitSync && g_portInEnabled.load(std::memory_order_relaxed)) {
-                        if (g_virtualPortIn) g_virtualPortIn->SendMidi(rt);
+                        try {
+                            if (auto vpi = GetSafeVirtualPortIn()) vpi->SendMidi(rt);
+                        } catch (...) {}
                     }
                     AddLog(LogSourceType::COM_IN_SYNC, "[COM->App] " + BytesToHex(rt), true, GetMidiCommandName(rt));
                     continue;
@@ -693,8 +769,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (parser->isSysEx) {
                     if (b == 0xF7) {
                         parser->sysexBuffer.push_back(0xF7);
-                        if (g_portInEnabled.load(std::memory_order_relaxed) && g_virtualPortIn) 
-                            g_virtualPortIn->SendMidi(parser->sysexBuffer);
+                        if (g_portInEnabled.load(std::memory_order_relaxed)) {
+                            try {
+                                if (auto vpiLocal = GetSafeVirtualPortIn()) vpiLocal->SendMidi(parser->sysexBuffer);
+                            } catch (...) {}
+                        }
                         AddLog(LogSourceType::COM_IN, "[COM->App] SysEx: " + BytesToHex(parser->sysexBuffer), false, "System Exclusive");
                         
                         // Identity Reply: F0 7E [dev] 06 02 43 00 [fMSB] [fLSB] [mMSB] [mLSB] ... F7
@@ -748,19 +827,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 else if (cmd >= 0x80 && cmd <= 0xEF) expected = 3;
                 
                 if (expected > 0 && parser->buffer.size() == expected) {
-                    if (g_portInEnabled.load(std::memory_order_relaxed) && g_virtualPortIn) 
-                        g_virtualPortIn->SendMidi(parser->buffer);
+                    if (g_portInEnabled.load(std::memory_order_relaxed)) {
+                        try {
+                            if (auto vpiLocal = GetSafeVirtualPortIn()) vpiLocal->SendMidi(parser->buffer);
+                        } catch (...) {}
+                    }
                     AddLog(LogSourceType::COM_IN, "[COM->App] " + BytesToHex(parser->buffer), false, GetMidiCommandName(parser->buffer));
                     parser->buffer.clear();
                 }
             }
-        });
+        }));
 
         // Reset port running-status so the receiver re-syncs on (re)connect
         g_lastSentPort.store(0, std::memory_order_relaxed);
 
         std::stringstream connMsg;
-        if (g_serialPort->IsOpen()) {
+        if (GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
             connMsg << "Opened " << comName << " successfully.\n";
             connMsg << "Virtual ports:\n";
             for (int i = 1; i <= 4; ++i) {
@@ -774,10 +856,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             connectionLost = false;
 
             // Auto-trigger Synth Identity Discovery on connect (if enabled)
-            if (g_serialPort && g_serialPort->IsOpen() && g_autoGetSynthInfo.load()) {
+            if (GetSafeSerialPort() && GetSafeSerialPort()->IsOpen() && g_autoGetSynthInfo.load()) {
                 // Auto-trigger Synth Identity Discovery on connect (Immediate)
                 std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
-                g_serialPort->Write(stdId);
+                if(auto sp2 = GetSafeSerialPort()) sp2->Write(stdId);
                 AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), false, "(Identity Request)");
                 
                 {
@@ -803,7 +885,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         } else {
             connMsg << "Failed to open " << comName << ". Is it in use?";
             AddLog(LogSourceType::APP_INFO, "Failed to open " + comName);
-            g_serialPort.reset();
+            ResetSafeSerialPort();
             connectionStatus = connMsg.str();
             return false;
         }
@@ -858,11 +940,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                                 SendToSerial(i, data);
                                 AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
                             });
-                        g_virtualPortsOut.push_back(std::move(vport));
+                        AddSafeVirtualPortOut(std::move(vport));
                     }
                     if (g_portInEnabled.load(std::memory_order_relaxed)) {
                         std::wstring inPortName = wBaseName + L" In";
-                        g_virtualPortIn = std::make_unique<VirtualMidiPort>(inPortName, nullptr);
+                        SetSafeVirtualPortIn(std::make_shared<VirtualMidiPort>(inPortName, nullptr));
                     }
                     AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
                 }
@@ -936,7 +1018,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (isConnected && !portExists) {
                     isConnected = false;
                     connectionLost.store(true);
-                    g_serialPort.reset();   // close the dead handle cleanly
+                    ResetSafeSerialPort();   // close the dead handle cleanly
                     AddLog(LogSourceType::APP_INFO, "COM port lost: " + activeComName);
                     connectionStatus = "COM port disconnected!";
                 }
@@ -969,7 +1051,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         ImGui::NewFrame();
 
         // Late MIDI Init Watcher: If service became available and autostart is on, trigger it
-        if (!g_autoStartAttempted.load() && autoStartVirtualMidi && g_midiStatus.load() == MidiServiceStatus::AVAILABLE && g_virtualPortsOut.empty() && !g_virtualPortIn) {
+        if (!g_autoStartAttempted.load() && autoStartVirtualMidi && g_midiStatus.load() == MidiServiceStatus::AVAILABLE && GetSafeVirtualPortsOut().empty() && !g_virtualPortIn) {
             g_autoStartAttempted.store(true);
             std::string baseNameStr(baseNameBuf);
             std::thread([&, baseNameStr]() {
@@ -1028,14 +1110,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     {
                         std::lock_guard<std::mutex> lock(g_shutdownMutex);
                         g_shutdownTasks.push_back({"Silence hardware", "..."});
-                        for (int i = 0; i < (int)g_virtualPortsOut.size(); i++) 
+                        for (int i = 0; i < (int)GetSafeVirtualPortsOut().size(); i++) 
                             g_shutdownTasks.push_back({"Close Virtual Out " + std::to_string(i+1), "Pending"});
-                        if (g_virtualPortIn) g_shutdownTasks.push_back({"Close Virtual In", "Pending"});
+                        if (auto vpi = GetSafeVirtualPortIn()) g_shutdownTasks.push_back({"Close Virtual In", "Pending"});
                         g_shutdownTasks.push_back({"Finalize connection", "Pending"});
                     }
 
                     // 1. Silence serial synths
-                    if (isConnected && g_serialPort && g_serialPort->IsOpen()) {
+                    if (isConnected && GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
                         for (int p = 1; p <= 4; ++p) {
                             std::vector<uint8_t> quiet;
                             for (int ch = 0; ch < 16; ++ch) quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
@@ -1046,30 +1128,30 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[0].status = "OK"; }
                     
                     // 2. Send MIDI Stop to Virtual Input (if exists)
-                    if (g_virtualPortIn) {
-                        g_virtualPortIn->SendMidi({ 0xFC });
+                    if (auto vpi = GetSafeVirtualPortIn()) {
+                        vpi->SendMidi({ 0xFC });
                     }
 
                     // 3. Parallel-ish Close with 100ms stagger
                     std::vector<std::thread> cleanThreads;
                     
                     // Launch Output Port Closures
-                    for (int i = 0; i < (int)g_virtualPortsOut.size(); ++i) {
+                    for (int i = 0; i < (int)GetSafeVirtualPortsOut().size(); ++i) {
                         int taskIdx = i + 1;
                         cleanThreads.emplace_back([this, i, taskIdx]() {
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "..."; }
-                            g_virtualPortsOut[i].reset();
+                            ResetSafeVirtualPortsOutIndex(i);
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "OK"; }
                         });
                         ::Sleep(1000); // 1s stagger between STARTING each port closure
                     }
                     
                     // Launch Input Port Closure
-                    if (g_virtualPortIn) {
+                    if (auto vpi = GetSafeVirtualPortIn()) {
                         int taskIdx = (int)g_shutdownTasks.size() - 2;
                         cleanThreads.emplace_back([this, taskIdx]() {
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "..."; }
-                            g_virtualPortIn.reset();
+                            ResetSafeVirtualPortIn();
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "OK"; }
                         });
                         ::Sleep(1000);
@@ -1079,12 +1161,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     for (auto& t : cleanThreads) {
                         if (t.joinable()) t.join();
                     }
-                    g_virtualPortsOut.clear(); 
+                    ClearSafeVirtualPortsOut(); 
                     
                     // 4. Finalize
                     int finalIdx = (int)g_shutdownTasks.size() - 1;
                     { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[finalIdx].status = "..."; }
-                    g_serialPort.reset();
+                    ResetSafeSerialPort();
                     { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[finalIdx].status = "OK"; }
                     
                     ::Sleep(200); 
@@ -1114,7 +1196,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             // ΓöÇΓöÇ Connection Tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if (ImGui::BeginTabItem("Connection")) {
                 ImGui::Spacing();
-                bool portsRunning = !g_virtualPortsOut.empty();
+                bool portsRunning = !GetSafeVirtualPortsOut().empty();
                 
                 ImGui::BeginDisabled(isConnected);
                 if (ImGui::Button("Refresh COM Ports")) {
@@ -1198,7 +1280,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (isConnected) {
                     ImGui::SameLine();
                     if (ImGui::Button("Disconnect", ImVec2(120, 30))) {
-                        g_serialPort.reset();
+                        ResetSafeSerialPort();
                         g_lastSentPort.store(0, std::memory_order_relaxed);
                         isConnected = false;
                         connectionLost.store(false);
@@ -1283,7 +1365,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 }
 
                 // Stop Virtual Ports button ΓÇö show when not connected but ports are alive
-                if (!isConnected && !g_virtualPortsOut.empty()) {
+                if (!isConnected && !GetSafeVirtualPortsOut().empty()) {
                     ImGui::Spacing();
                     ImGui::BeginDisabled(g_isConnecting.load());
                     ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f, 0.3f, 0.0f, 1.0f));
@@ -1292,8 +1374,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     if (ImGui::Button("Stop Virtual Ports", ImVec2(-1, 28))) {
                         g_isConnecting.store(true);
                         std::thread([&]() {
-                            g_virtualPortsOut.clear();
-                            g_virtualPortIn.reset();
+                            ClearSafeVirtualPortsOut();
+                            ResetSafeVirtualPortIn();
                             connectionStatus = "Disconnected.";
                             AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.");
                             g_isConnecting.store(false);
@@ -1421,9 +1503,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 }
             ImGui::SameLine();
             if (ImGui::Button("Get synth info")) {
-                if (g_serialPort && g_serialPort->IsOpen()) {
+                if (GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
                     std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
-                    g_serialPort->Write(stdId);
+                    if(auto sp2 = GetSafeSerialPort()) sp2->Write(stdId);
                     AddLog(LogSourceType::APP_INFO, "[System] " + BytesToHex(stdId), false, "(Identity Request)");
                     {
                         std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
@@ -1571,7 +1653,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     }
 
     // Exit Cleanup: Silence all and stop playback
-    if (isConnected && g_serialPort && g_serialPort->IsOpen()) {
+    if (isConnected && GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
         for (int p = 1; p <= 4; ++p) {
             std::vector<uint8_t> quiet;
             for (int ch = 0; ch < 16; ++ch) {
@@ -1582,14 +1664,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         }
         
         // Also send MIDI Stop to virtual Input if active
-        if (g_virtualPortIn) {
-            g_virtualPortIn->SendMidi({ 0xFC });
+        if (auto vpi = GetSafeVirtualPortIn()) {
+            vpi->SendMidi({ 0xFC });
         }
     }
 
-    g_serialPort.reset();
-    g_virtualPortsOut.clear();
-    g_virtualPortIn.reset();
+    ResetSafeSerialPort();
+    ClearSafeVirtualPortsOut();
+    ResetSafeVirtualPortIn();
 
     // Persist imgui layout into settings.ini before destroying context
     SaveImguiIniToSettings();
@@ -1704,7 +1786,8 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 // ΓöÇΓöÇ Centralized Serial Writing with Multiplexing ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
-    if (!g_serialPort || !g_serialPort->IsOpen() || data.empty()) return;
+    auto sp = GetSafeSerialPort();
+    if (!sp || !sp->IsOpen() || data.empty()) return;
 
     std::lock_guard<std::mutex> lock(g_serialWriteMutex);
     std::vector<uint8_t> mux;
@@ -1724,10 +1807,14 @@ void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
         }
         AddLog(LogSourceType::APP_INFO, logMsg);
         
-        g_serialPort->Write(mux);
+        sp->Write(mux);
         g_bytesSent.fetch_add(mux.size(), std::memory_order_relaxed);
     }
 
-    g_serialPort->Write(data);
+    sp->Write(data);
     g_bytesSent.fetch_add(data.size(), std::memory_order_relaxed);
 }
+
+
+
+

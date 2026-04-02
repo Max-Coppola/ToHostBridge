@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <mutex>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -16,6 +17,8 @@ public:
     VirtualMidiPort(const std::wstring& portName, MidiRxCallback rxCallback = nullptr);
     ~VirtualMidiPort();
 
+    static void RemoveStalePorts();
+
     bool IsValid() const;
     void SendMidi(const std::vector<uint8_t>& data);
 
@@ -26,7 +29,8 @@ private:
 
     MidiRxCallback m_rxCallback;
     std::wstring m_portName;
-    volatile bool m_isClosing = false;
+    std::atomic<bool> m_isClosing{ false };
+    mutable std::mutex m_portMutex;
     
     winrt::Microsoft::Windows::Devices::Midi2::Endpoints::Virtual::MidiVirtualDevice m_virtualDevice{ nullptr };
     winrt::Microsoft::Windows::Devices::Midi2::MidiSession m_session{ nullptr };

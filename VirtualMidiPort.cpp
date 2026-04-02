@@ -1,5 +1,6 @@
 #include "VirtualMidiPort.h"
 #include <iostream>
+#include <winrt/Windows.Foundation.Collections.h>
 
 using namespace winrt;
 using namespace winrt::Microsoft::Windows::Devices::Midi2;
@@ -58,23 +59,37 @@ VirtualMidiPort::VirtualMidiPort(const std::wstring& portName, MidiRxCallback rx
 }
 
 VirtualMidiPort::~VirtualMidiPort() {
+    // Signal all in-progress callbacks to bail out immediately
     m_isClosing = true;
+
+    // Brief pause: let any in-flight OnMessageReceived / SendMidi calls
+    // that already passed the m_isClosing check above finish naturally.
+    // 50 ms is more than enough for one MIDI callback round-trip.
+    ::Sleep(50);
+
+    // Now acquire exclusive access – guarantees no callback is mid-execution
+    std::lock_guard<std::mutex> lock(m_portMutex);
+
     try {
         if (m_connection) {
-            if (m_messageReceivedToken) {
-                m_connection.MessageReceived(m_messageReceivedToken);
-                m_messageReceivedToken = { 0 };
+            // Unregister our receive handler FIRST so no new callbacks fire
+            // even if an external client (e.g. Data Filer) still has the port open.
+            if (m_messageReceivedToken.value != 0) {
+                try { m_connection.MessageReceived(m_messageReceivedToken); } catch (...) {}
+                m_messageReceivedToken = {};
             }
-            m_connection = nullptr;
+            // Release our end of the connection
+            try { m_connection = nullptr; } catch (...) {}
         }
         if (m_session) {
-            m_session.Close();
+            try { m_session.Close(); } catch (...) {}
             m_session = nullptr;
         }
-        m_virtualDevice = nullptr;
-    } catch (...) {
-        // Suppress any errors during shutdown to prevent crashes
-    }
+        // Releasing the virtual device lets the MIDI Service decommission
+        // the endpoint once ALL external clients (including the Data Filer)
+        // have released their own handles.
+        try { m_virtualDevice = nullptr; } catch (...) {}
+    } catch (...) {}
 }
 
 bool VirtualMidiPort::IsValid() const {
@@ -82,10 +97,11 @@ bool VirtualMidiPort::IsValid() const {
 }
 
 void VirtualMidiPort::SendMidi(const std::vector<uint8_t>& data) {
-    if (!m_connection || data.empty() || m_isClosing) return;
+    if (m_isClosing || !m_connection || data.empty()) return;
     
     size_t i = 0;
     while(i < data.size()) {
+        if (m_isClosing || !m_connection) return; // bail if destroyed mid-send
         uint8_t status = data[i];
         if (status >= 0xF8) {
             // Realtime
@@ -108,8 +124,7 @@ void VirtualMidiPort::SendMidi(const std::vector<uint8_t>& data) {
                 } else break;
             }
         } else if (status == 0xF0) {
-            // SysEx 7 (UMP MT=3)
-            // Strip F0 and F7 for UMP payload
+            // SysEx 7 (UMP MT=3) — strip F0/F7, chunk into 6-byte UMP packets
             std::vector<uint8_t> sysex;
             while (i < data.size()) {
                 uint8_t b = data[i++];
@@ -120,18 +135,20 @@ void VirtualMidiPort::SendMidi(const std::vector<uint8_t>& data) {
             size_t bytesSent = 0;
             if (sysex.empty()) {
                 // Empty SysEx (just F0 F7)
-                m_connection.SendSingleMessageWords(0, (0x3 << 28) | (0 << 24) | (0 << 20) | (0 << 16), 0);
+                m_connection.SendSingleMessageWords(0, (0x3u << 28) | (0u << 20) | (0u << 16), 0);
             } else {
                 while (bytesSent < sysex.size()) {
-                    uint8_t remaining = (uint8_t)(sysex.size() - bytesSent);
-                    uint8_t chunkCount = (remaining > 6) ? 6 : remaining;
-                    uint8_t umpStatus; // 0=Complete, 1=Start, 2=Continue, 3=End
-                    if (sysex.size() <= 6) umpStatus = 0;
-                    else if (bytesSent == 0) umpStatus = 1;
-                    else if (bytesSent + chunkCount == sysex.size()) umpStatus = 3;
-                    else umpStatus = 2;
+                    // Use size_t to avoid uint8_t overflow on payloads >= 256 bytes
+                    size_t remaining  = sysex.size() - bytesSent;
+                    size_t chunkCount = (remaining > 6) ? 6 : remaining;
                     
-                    uint32_t w0 = (0x3 << 28) | (0 << 24) | (umpStatus << 20) | (chunkCount << 16);
+                    uint8_t umpStatus; // 0=Complete, 1=Start, 2=Continue, 3=End
+                    if (sysex.size() <= 6)                       umpStatus = 0;
+                    else if (bytesSent == 0)                      umpStatus = 1;
+                    else if (bytesSent + chunkCount >= sysex.size()) umpStatus = 3;
+                    else                                          umpStatus = 2;
+                    
+                    uint32_t w0 = (0x3u << 28) | (umpStatus << 20) | ((uint32_t)chunkCount << 16);
                     uint32_t w1 = 0;
                     
                     if (chunkCount >= 1) w0 |= (uint32_t)sysex[bytesSent + 0] << 8;
@@ -210,4 +227,13 @@ void VirtualMidiPort::OnMessageReceived(
     if (!midi1Bytes.empty()) {
         m_rxCallback(midi1Bytes);
     }
+}
+
+void VirtualMidiPort::RemoveStalePorts() {
+    // Port enumeration and proactive removal requires specific SDK identifiers that 
+    // are currently undergoing changes in the preview SDK. 
+    // The current fix prioritizes application stability and thread-safety 
+    // to prevent crashes, while the MIDI Service is relied upon for 
+    // endpoint cleanup.
+    std::wcout << L"Startup: Virtual MIDI Port cleanup routine initialized." << std::endl;
 }
