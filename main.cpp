@@ -17,6 +17,9 @@
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Services.Store.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <shobjidl.h> // For IInitializeWithWindow
 #include <winmidi/init/Microsoft.Windows.Devices.Midi2.Initialization.hpp>
 
 #include "SerialPort.h"
@@ -43,6 +46,12 @@ std::string g_shutdownSubStatus = "";
 struct ShutdownTask { std::string name; std::string status; };
 std::vector<ShutdownTask> g_shutdownTasks;
 std::mutex g_shutdownMutex;
+
+// Store Update State
+bool g_updateAvailable = false;
+bool g_isUpdating = false;
+winrt::Windows::Foundation::Collections::IVectorView<winrt::Windows::Services::Store::StorePackageUpdate> g_availableUpdates{ nullptr };
+bool g_mockUpdate = false;
 
 // Data
 static ID3D11Device*            g_pd3dDevice = nullptr;
@@ -483,8 +492,53 @@ void SetStartWithWindowsRegistry(bool enable) {
 }
 
 // Main code explicitly for Windows Subsystem
+bool IsPackaged() {
+    UINT32 length = 0;
+    LONG result = GetCurrentPackageFullName(&length, nullptr);
+    return result != APPMODEL_ERROR_NO_PACKAGE;
+}
+
+winrt::fire_and_forget CheckForUpdatesAsync(HWND hwnd) {
+    if (g_mockUpdate) {
+        // Sleep a bit to simulate network delay
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        g_updateAvailable = true;
+        co_return;
+    }
+
+    if (!IsPackaged()) co_return;
+
+    try {
+        using namespace winrt::Windows::Services::Store;
+        StoreContext context = StoreContext::GetDefault();
+        
+        // Associate the StoreContext with our app window (required for desktop apps)
+        auto initializeWithWindow = context.as<IInitializeWithWindow>();
+        initializeWithWindow->Initialize(hwnd);
+
+        auto updates = co_await context.GetAppAndOptionalStorePackageUpdatesAsync();
+        if (updates.Size() > 0) {
+            g_availableUpdates = updates;
+            g_updateAvailable = true;
+        }
+    } catch (...) {
+        // Silently fail to avoid crashing if Store service is unavailable or throwing
+    }
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
+    // Parse command line for --mock-update
+    int argc;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv) {
+        for (int i = 0; i < argc; i++) {
+            if (wcscmp(argv[i], L"--mock-update") == 0) {
+                g_mockUpdate = true;
+            }
+        }
+        LocalFree(argv);
+    }
     // 0. Startup Virtual Port Cleanup (To handle prior crashes)
     VirtualMidiPort::RemoveStalePorts();
     
@@ -536,7 +590,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), nullptr, nullptr, nullptr, L"ToHostBridge", LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) };
     ::RegisterClassExW(&wc);
     // Adjusted window dimensions for bold headers and better spacing
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.2.1", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.2.2", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+
+    // Initial check for Microsoft Store updates
+    CheckForUpdatesAsync(hwnd);
 
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hwnd;
@@ -1138,7 +1195,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     // Launch Output Port Closures
                     for (int i = 0; i < (int)GetSafeVirtualPortsOut().size(); ++i) {
                         int taskIdx = i + 1;
-                        cleanThreads.emplace_back([this, i, taskIdx]() {
+                        cleanThreads.emplace_back([i, taskIdx]() {
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "..."; }
                             ResetSafeVirtualPortsOutIndex(i);
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "OK"; }
@@ -1149,7 +1206,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     // Launch Input Port Closure
                     if (auto vpi = GetSafeVirtualPortIn()) {
                         int taskIdx = (int)g_shutdownTasks.size() - 2;
-                        cleanThreads.emplace_back([this, taskIdx]() {
+                        cleanThreads.emplace_back([taskIdx]() {
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "..."; }
                             ResetSafeVirtualPortIn();
                             { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_shutdownTasks[taskIdx].status = "OK"; }
@@ -1177,6 +1234,46 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             ImGui::SetNextWindowPos(ImVec2(0, 0));
             ImGui::SetNextWindowSize(io.DisplaySize);
             ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+
+            // Microsoft Store Update Popup
+            static bool updatePopupOpened = false;
+            if (g_updateAvailable && !updatePopupOpened) {
+                ImGui::OpenPopup("Update Available");
+                updatePopupOpened = true;
+            }
+
+            if (ImGui::BeginPopupModal("Update Available", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Spacing();
+                ImGui::Text("A new update is available in the Microsoft Store!");
+                if (g_mockUpdate) ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "[DEBUG] Mock Update Mode Active");
+                ImGui::Spacing();
+                ImGui::Text("Would you like to download and install it now?");
+                ImGui::TextDisabled("The application will close to begin the update process.");
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                if (ImGui::Button("Update Now", ImVec2(140, 35))) {
+                    if (g_mockUpdate) {
+                        ::MessageBoxA(NULL, "Mock update triggered successfully!", "Debug", MB_OK);
+                    } else {
+                        // Standard fire-and-forget for the update request
+                        []() -> winrt::fire_and_forget {
+                            try {
+                                auto context = winrt::Windows::Services::Store::StoreContext::GetDefault();
+                                // HWND was already initialized in CheckForUpdatesAsync
+                                co_await context.RequestDownloadAndInstallStorePackageUpdatesAsync(g_availableUpdates);
+                            } catch (...) {}
+                        }();
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Later", ImVec2(140, 35))) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
 
         // Header Error Messaging for MIDI Services (Moved to Connection Tab)
   
@@ -1801,11 +1898,9 @@ void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
         g_lastSentPort.store(portIdx, std::memory_order_relaxed);
         
         // Log the multiplexing byte for visibility (Port Select)
-        std::string logMsg = "[Port Select] F5 " + BytesToHex({ (uint8_t)portIdx });
-        if (showNames) {
-            logMsg += " (Addressing Parts " + std::to_string((portIdx - 1) * 16 + 1) + "-" + std::to_string(portIdx * 16) + ")";
-        }
-        AddLog(LogSourceType::APP_INFO, logMsg);
+        std::string hex = "F5 " + BytesToHex({ (uint8_t)portIdx });
+        std::string desc = "(Addressing Parts " + std::to_string((portIdx - 1) * 16 + 1) + "-" + std::to_string(portIdx * 16) + ")";
+        AddLog(LogSourceType::APP_INFO, "[Port Select] " + hex, false, desc);
         
         sp->Write(mux);
         g_bytesSent.fetch_add(mux.size(), std::memory_order_relaxed);

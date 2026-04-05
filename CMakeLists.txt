@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(ToHostBridge VERSION 1.2.2 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 include(FetchContent)
@@ -36,6 +36,8 @@ target_include_directories(ToHostBridge PRIVATE
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
+
+
 
 target_link_libraries(ToHostBridge 
     PRIVATE winmm

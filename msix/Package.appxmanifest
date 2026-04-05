@@ -9,7 +9,7 @@
   <Identity
     Name="MaxCoppola.ToHostBridge"
     Publisher="CN=B2012D8E-C27E-4748-825E-1B3C39DEB0BF"
-    Version="1.2.2.0" />
+    Version="1.2.2.2" />
 
   <Properties>
     <DisplayName>ToHost Bridge</DisplayName>
