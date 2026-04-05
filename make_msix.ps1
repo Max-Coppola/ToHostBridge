@@ -6,7 +6,7 @@ $signtool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtoo
 $sourceExe = "build\Release\ToHostBridge.exe"
 $manifest = "msix\Package.appxmanifest"
 $assetsDir = "msix\Assets"
-$outputMsix = "releases\ToHostBridge_v1.2.2.2_x64.msix"
+$outputMsix = "releases\ToHostBridge_v1.2.3.0_x64.msix"
 $layoutDir = "msix\layout"
 
 if (-not (Test-Path $sourceExe)) {
