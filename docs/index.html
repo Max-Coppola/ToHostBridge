@@ -263,11 +263,11 @@
             const viewportHeight = window.innerHeight;
             
             // Trigger thresholds:
-            // Trigger later: when the section top reaches the middle (0.5) of the viewport
-            if (rect.top < viewportHeight * 0.5 && index === 0) {
+            // Trigger at the very top: only when the section top reaches the top 5% (0.05) of the viewport
+            if (rect.top < viewportHeight * 0.05 && index === 0) {
                 index = 1;
                 updateSlider();
-            } else if (rect.top > viewportHeight * 0.55 && index === 1) {
+            } else if (rect.top > viewportHeight * 0.1 && index === 1) {
                 index = 0;
                 updateSlider();
             }
