@@ -1242,34 +1242,48 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 updatePopupOpened = true;
             }
 
+            ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
             if (ImGui::BeginPopupModal("Update Available", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::Spacing();
-                ImGui::Text("A new update is available in the Microsoft Store!");
-                if (g_mockUpdate) ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "[DEBUG] Mock Update Mode Active");
-                ImGui::Spacing();
-                ImGui::Text("Would you like to download and install it now?");
-                ImGui::TextDisabled("The application will close to begin the update process.");
+                
+                auto centerText = [](const char* text, bool bold = false) {
+                    float windowWidth = ImGui::GetWindowSize().x;
+                    float textWidth = ImGui::CalcTextSize(text).x;
+                    ImGui::SetCursorPosX((windowWidth - textWidth) * 0.5f);
+                    if (bold) ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", text);
+                    else ImGui::Text("%s", text);
+                };
+
+                centerText("Update Available via Microsoft Store", true);
+                
+                if (g_mockUpdate) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 0.0f, 1.0f));
+                    centerText("[MOCK MODE: v1.2.1.0]");
+                    ImGui::PopStyleColor();
+                }
+                
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
 
-                if (ImGui::Button("Update Now", ImVec2(140, 35))) {
+                // Center buttons
+                float b1Width = 180.0f;
+                float b2Width = 140.0f;
+                float totalWidth = b1Width + b2Width + ImGui::GetStyle().ItemSpacing.x;
+                ImGui::SetCursorPosX((ImGui::GetWindowSize().x - totalWidth) * 0.5f);
+                
+                if (ImGui::Button("Close & update", ImVec2(b1Width, 40))) {
                     if (g_mockUpdate) {
-                        ::MessageBoxA(NULL, "Mock update triggered successfully!", "Debug", MB_OK);
+                        ::MessageBoxA(NULL, "Mock update triggered. PFN: MaxCoppola.ToHostBridge_cmgt2fcrje4mm", "Debug", MB_OK);
                     } else {
-                        // Standard fire-and-forget for the update request
-                        []() -> winrt::fire_and_forget {
-                            try {
-                                auto context = winrt::Windows::Services::Store::StoreContext::GetDefault();
-                                // HWND was already initialized in CheckForUpdatesAsync
-                                co_await context.RequestDownloadAndInstallStorePackageUpdatesAsync(g_availableUpdates);
-                            } catch (...) {}
-                        }();
+                        ::ShellExecuteA(NULL, "open", "ms-windows-store://pdp/?PFN=MaxCoppola.ToHostBridge_cmgt2fcrje4mm", NULL, NULL, SW_SHOWNORMAL);
                     }
+                    g_isShuttingDown.store(true);
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Later", ImVec2(140, 35))) {
+                if (ImGui::Button("Maybe later", ImVec2(b2Width, 40))) {
                     ImGui::CloseCurrentPopup();
                 }
                 ImGui::EndPopup();

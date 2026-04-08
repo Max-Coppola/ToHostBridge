@@ -64,12 +64,34 @@
     <section id="performance" class="video-demo">
         <div class="container">
             <h2>ToHost Bridge in Action</h2>
-            <p class="section-subtitle">A quick MIDI demonstration using the Yamaha MU2000 and SOL2.</p>
-            <div class="video-container">
-                <iframe width="100%" height="450" src="https://www.youtube.com/embed/8kw8M0D7CXs"
-                    title="ToHost Bridge Demo" frameborder="0"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    allowfullscreen></iframe>
+            <p class="section-subtitle">Real-world examples of ToHost Bridge.</p>
+            <div class="slider-container">
+                <div class="prev-btn slider-nav">&#10094;</div>
+                <div class="next-btn slider-nav">&#10095;</div>
+                
+                <div class="slider-wrapper">
+                    <div class="slider-track" id="slider-track">
+                        <!-- Slide 1 -->
+                        <div class="slide">
+                            <iframe src="https://www.youtube.com/embed/8kw8M0D7CXs" 
+                                title="MU2000 Setup Demonstration" frameborder="0" 
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+                                allowfullscreen></iframe>
+                        </div>
+                        <!-- Slide 2 -->
+                        <div class="slide">
+                            <iframe src="https://www.youtube.com/embed/jU2ricepsSM" 
+                                title="Synthesizer Performance" frameborder="0" 
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+                                allowfullscreen></iframe>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="slider-dots" id="slider-dots">
+                    <div class="dot active"></div>
+                    <div class="dot"></div>
+                </div>
             </div>
         </div>
     </section>
@@ -198,6 +220,37 @@
             <p>&copy; 2026 Maxime Coppola. Open Source under the MIT License.</p>
         </div>
     </footer>
+
+    <script>
+        // Minimal seamless slider engine
+        const track = document.getElementById('slider-track');
+        const dots = document.querySelectorAll('.dot');
+        const nextBtn = document.querySelector('.next-btn');
+        const prevBtn = document.querySelector('.prev-btn');
+        let index = 0;
+
+        function updateSlider() {
+            track.style.transform = `translateX(-${index * 100}%)`;
+            dots.forEach((dot, i) => dot.classList.toggle('active', i === index));
+        }
+
+        nextBtn.addEventListener('click', () => {
+            index = (index + 1) % dots.length;
+            updateSlider();
+        });
+
+        prevBtn.addEventListener('click', () => {
+            index = (index - 1 + dots.length) % dots.length;
+            updateSlider();
+        });
+
+        dots.forEach((dot, i) => {
+            dot.addEventListener('click', () => {
+                index = i;
+                updateSlider();
+            });
+        });
+    </script>
 </body>
 
 </html>
