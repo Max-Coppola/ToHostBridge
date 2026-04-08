@@ -64,7 +64,7 @@
     <section id="performance" class="video-demo">
         <div class="container">
             <h2>ToHost Bridge in Action</h2>
-            <p class="section-subtitle">Real-world examples of ToHost Bridge.</p>
+            <p class="section-subtitle">Real-woirld examples of ToHost Bridge.</p>
             <div class="slider-container">
                 <div class="prev-btn slider-nav">&#10094;</div>
                 <div class="next-btn slider-nav">&#10095;</div>
@@ -73,14 +73,14 @@
                     <div class="slider-track" id="slider-track">
                         <!-- Slide 1 -->
                         <div class="slide">
-                            <iframe src="https://www.youtube.com/embed/8kw8M0D7CXs" 
+                            <iframe id="video-setup" src="https://www.youtube.com/embed/8kw8M0D7CXs?enablejsapi=1" 
                                 title="MU2000 Setup Demonstration" frameborder="0" 
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
                                 allowfullscreen></iframe>
                         </div>
                         <!-- Slide 2 -->
                         <div class="slide">
-                            <iframe src="https://www.youtube.com/embed/jU2ricepsSM" 
+                            <iframe id="video-perf" src="https://www.youtube.com/embed/jU2ricepsSM?enablejsapi=1" 
                                 title="Synthesizer Performance" frameborder="0" 
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
                                 allowfullscreen></iframe>
@@ -221,34 +221,64 @@
         </div>
     </footer>
 
+    <script src="https://www.youtube.com/iframe_api"></script>
     <script>
-        // Minimal seamless slider engine
+        // Intelligent Scroll-Bound Slider Engine
         const track = document.getElementById('slider-track');
         const dots = document.querySelectorAll('.dot');
         const nextBtn = document.querySelector('.next-btn');
         const prevBtn = document.querySelector('.prev-btn');
+        const performanceSection = document.getElementById('performance');
+        
         let index = 0;
+        let players = [];
+        let manualOverride = false;
 
-        function updateSlider() {
+        // Initialize YouTube Players
+        function onYouTubeIframeAPIReady() {
+            players[0] = new YT.Player('video-setup');
+            players[1] = new YT.Player('video-perf');
+        }
+
+        function isAnyVideoPlaying() {
+            return players.some(p => p && p.getPlayerState && p.getPlayerState() === 1);
+        }
+
+        function updateSlider(isManual = false) {
+            if (isManual) manualOverride = true;
             track.style.transform = `translateX(-${index * 100}%)`;
             dots.forEach((dot, i) => dot.classList.toggle('active', i === index));
         }
 
-        nextBtn.addEventListener('click', () => {
-            index = (index + 1) % dots.length;
-            updateSlider();
-        });
+        // Horizontal Navigation (Infinite Loop)
+        nextBtn.addEventListener('click', () => { index = (index + 1) % dots.length; updateSlider(true); });
+        prevBtn.addEventListener('click', () => { index = (index - 1 + dots.length) % dots.length; updateSlider(true); });
+        dots.forEach((dot, i) => dot.addEventListener('click', () => { index = i; updateSlider(true); }));
 
-        prevBtn.addEventListener('click', () => {
-            index = (index - 1 + dots.length) % dots.length;
-            updateSlider();
-        });
+        // Smart Scroll Linking
+        window.addEventListener('scroll', () => {
+            if (manualOverride || isAnyVideoPlaying()) return;
 
-        dots.forEach((dot, i) => {
-            dot.addEventListener('click', () => {
-                index = i;
+            const rect = performanceSection.getBoundingClientRect();
+            const viewportHeight = window.innerHeight;
+            
+            // Trigger thresholds:
+            // Trigger earlier: when the section top enters the bottom 25% of the viewport
+            if (rect.top < viewportHeight * 0.75 && index === 0) {
+                index = 1;
                 updateSlider();
-            });
+            } else if (rect.top > viewportHeight * 0.8 && index === 1) {
+                index = 0;
+                updateSlider();
+            }
+        });
+
+        // Reset manual override if section entirely leaves viewport
+        window.addEventListener('scroll', () => {
+            const rect = performanceSection.getBoundingClientRect();
+            if (rect.bottom < 0 || rect.top > window.innerHeight) {
+                manualOverride = false;
+            }
         });
     </script>
 </body>
