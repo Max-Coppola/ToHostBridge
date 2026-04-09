@@ -73,14 +73,14 @@
                     <div class="slider-track" id="slider-track">
                         <!-- Slide 1 -->
                         <div class="slide">
-                            <iframe id="video-setup" src="https://www.youtube.com/embed/8kw8M0D7CXs?enablejsapi=1" 
+                            <iframe src="https://www.youtube.com/embed/8kw8M0D7CXs" 
                                 title="MU2000 Setup Demonstration" frameborder="0" 
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
                                 allowfullscreen></iframe>
                         </div>
                         <!-- Slide 2 -->
                         <div class="slide">
-                            <iframe id="video-perf" src="https://www.youtube.com/embed/jU2ricepsSM?enablejsapi=1" 
+                            <iframe src="https://www.youtube.com/embed/jU2ricepsSM" 
                                 title="Synthesizer Performance" frameborder="0" 
                                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
                                 allowfullscreen></iframe>
@@ -221,64 +221,36 @@
         </div>
     </footer>
 
-    <script src="https://www.youtube.com/iframe_api"></script>
     <script>
-        // Intelligent Scroll-Bound Slider Engine
+        // Minimal seamless slider engine
         const track = document.getElementById('slider-track');
+        const slides = document.querySelectorAll('.slide');
         const dots = document.querySelectorAll('.dot');
         const nextBtn = document.querySelector('.next-btn');
         const prevBtn = document.querySelector('.prev-btn');
-        const performanceSection = document.getElementById('performance');
-        
         let index = 0;
-        let players = [];
-        let manualOverride = false;
+        const totalSlides = slides.length;
 
-        // Initialize YouTube Players
-        function onYouTubeIframeAPIReady() {
-            players[0] = new YT.Player('video-setup');
-            players[1] = new YT.Player('video-perf');
-        }
-
-        function isAnyVideoPlaying() {
-            return players.some(p => p && p.getPlayerState && p.getPlayerState() === 1);
-        }
-
-        function updateSlider(isManual = false) {
-            if (isManual) manualOverride = true;
+        function updateSlider() {
             track.style.transform = `translateX(-${index * 100}%)`;
             dots.forEach((dot, i) => dot.classList.toggle('active', i === index));
         }
 
-        // Horizontal Navigation (Infinite Loop)
-        nextBtn.addEventListener('click', () => { index = (index + 1) % dots.length; updateSlider(true); });
-        prevBtn.addEventListener('click', () => { index = (index - 1 + dots.length) % dots.length; updateSlider(true); });
-        dots.forEach((dot, i) => dot.addEventListener('click', () => { index = i; updateSlider(true); }));
-
-        // Smart Scroll Linking
-        window.addEventListener('scroll', () => {
-            if (manualOverride || isAnyVideoPlaying()) return;
-
-            const rect = performanceSection.getBoundingClientRect();
-            const viewportHeight = window.innerHeight;
-            
-            // Trigger thresholds:
-            // Trigger at the very top: only when the section top reaches the top 5% (0.05) of the viewport
-            if (rect.top < viewportHeight * 0.05 && index === 0) {
-                index = 1;
-                updateSlider();
-            } else if (rect.top > viewportHeight * 0.1 && index === 1) {
-                index = 0;
-                updateSlider();
-            }
+        nextBtn.addEventListener('click', () => {
+            index = (index + 1) % totalSlides;
+            updateSlider();
         });
 
-        // Reset manual override if section entirely leaves viewport
-        window.addEventListener('scroll', () => {
-            const rect = performanceSection.getBoundingClientRect();
-            if (rect.bottom < 0 || rect.top > window.innerHeight) {
-                manualOverride = false;
-            }
+        prevBtn.addEventListener('click', () => {
+            index = (index - 1 + totalSlides) % totalSlides;
+            updateSlider();
+        });
+
+        dots.forEach((dot, i) => {
+            dot.addEventListener('click', () => {
+                index = i;
+                updateSlider();
+            });
         });
     </script>
 </body>
