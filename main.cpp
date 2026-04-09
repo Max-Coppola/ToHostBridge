@@ -47,6 +47,9 @@ struct ShutdownTask { std::string name; std::string status; };
 std::vector<ShutdownTask> g_shutdownTasks;
 std::mutex g_shutdownMutex;
 
+std::atomic<bool> g_isManualStopping{false};
+std::vector<ShutdownTask> g_manualStopTasks;
+
 // Store Update State
 bool g_updateAvailable = false;
 bool g_isUpdating = false;
@@ -148,7 +151,8 @@ std::mutex g_serialWriteMutex;
 std::atomic<int> g_lastSentPort{0};
 
 // Per-port enable flags (toggled via UI, read from callbacks)
-std::atomic<bool> g_portEnabled[4];
+// Per-port enable flags (toggled via UI, read from callbacks)
+std::atomic<bool> g_portEnabled[8];
 // portInEnabled: controls COM -> virtual In (serial receive callback)
 std::atomic<bool> g_portInEnabled{true};
 std::string g_detectedSynth = "";
@@ -207,9 +211,13 @@ enum class LogSourceType {
     APP_OUT_1,
     APP_OUT_2,
     APP_OUT_3,
-    APP_OUT_4
+    APP_OUT_4,
+    APP_OUT_5,
+    APP_OUT_6,
+    APP_OUT_7,
+    APP_OUT_8
 };
-static const int LOG_SOURCE_COUNT = 7;
+static const int LOG_SOURCE_COUNT = 11;
 
 struct LogEntry {
     LogSourceType source;
@@ -395,7 +403,7 @@ void SaveSettings(const std::string& comName, const std::string& baseName, bool 
     WritePrivateProfileStringA("General", "LightUI", lightUI ? "1" : "0", ini.c_str());
     WritePrivateProfileStringA("General", "AutoGetSynthInfo", g_autoGetSynthInfo.load() ? "1" : "0", ini.c_str());
     WritePrivateProfileStringA("Ports", "PortInEnabled", g_portInEnabled.load() ? "1" : "0", ini.c_str());
-    for (int p = 0; p < 4; ++p)
+    for (int p = 0; p < 8; ++p)
         WritePrivateProfileStringA("Ports", ("Port" + std::to_string(p+1) + "Enabled").c_str(), g_portEnabled[p].load() ? "1" : "0", ini.c_str());
     // Save imgui layout
     SaveImguiIniToSettings();
@@ -407,7 +415,7 @@ void SaveSettings(const std::string& comName, const std::string& baseName, bool 
     };
     saveColor("ColSys", cSys);
     saveColor("ColIn", cIn);
-    for (int i=0; i<4; i++) saveColor(("ColOut" + std::to_string(i+1)).c_str(), cOut[i]);
+    for (int i=0; i<8; i++) saveColor(("ColOut" + std::to_string(i+1)).c_str(), cOut[i]);
 }
 
 void LoadSettings(std::string& comName, char* baseName, bool& autoStart, bool& startWin, bool& autoReconn, bool& startTray, ImVec4& cSys, ImVec4& cIn, ImVec4* cOut, bool& stayOnTop, bool& startMinimized, bool& lightUI) {
@@ -430,7 +438,7 @@ void LoadSettings(std::string& comName, char* baseName, bool& autoStart, bool& s
     lightUI       = GetPrivateProfileIntA("General", "LightUI", 0, ini.c_str()) != 0;
     g_autoGetSynthInfo.store(GetPrivateProfileIntA("General", "AutoGetSynthInfo", 1, ini.c_str()) != 0);
     g_portInEnabled.store(GetPrivateProfileIntA("Ports", "PortInEnabled", 1, ini.c_str()) != 0);
-    for (int p = 0; p < 4; ++p)
+    for (int p = 0; p < 8; ++p)
         g_portEnabled[p].store(GetPrivateProfileIntA("Ports", ("Port" + std::to_string(p+1) + "Enabled").c_str(), 1, ini.c_str()) != 0);
 
     auto loadColor = [&](const char* key, ImVec4 def) -> ImVec4 {
@@ -447,6 +455,10 @@ void LoadSettings(std::string& comName, char* baseName, bool& autoStart, bool& s
     cOut[1] = loadColor("ColOut2", ImVec4(1.0f, 0.8f, 0.4f, 1.0f));
     cOut[2] = loadColor("ColOut3", ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
     cOut[3] = loadColor("ColOut4", ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
+    cOut[4] = loadColor("ColOut5", ImVec4(0.4f, 1.0f, 1.0f, 1.0f));
+    cOut[5] = loadColor("ColOut6", ImVec4(0.6f, 0.7f, 1.0f, 1.0f)); // Brightened for dark-mode visibility (was 0.4, 0.4, 1.0)
+    cOut[6] = loadColor("ColOut7", ImVec4(1.0f, 0.4f, 1.0f, 1.0f));
+    cOut[7] = loadColor("ColOut8", ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
 }
 
 void SetStartWithWindowsRegistry(bool enable) {
@@ -647,10 +659,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     bool stayOnTop = false;
     bool startMinimized = false;
     bool lightUI = false;
-    ImVec4 colSys, colIn, colOut[4];
+    ImVec4 colSys, colIn, colOut[8]; // Corrected size to 8 ports
 
     // Init port-enable flags to true before LoadSettings (which may override)
-    for (int i = 0; i < 4; ++i) g_portEnabled[i].store(true);
+    for (int i = 0; i < 8; ++i) g_portEnabled[i].store(true);
 
     LoadSettings(savedComName, baseNameBuf, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
     // Sync registry with loaded INI setting (especially important on first run after MSI install)
@@ -704,7 +716,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     // Filters
     bool filterSys = true;
     bool filterIn = true;
-    bool filterOut[4] = {true, true, true, true};
+    bool filterOut[8] = {true, true, true, true, true, true, true, true};
     bool filterSync = true;
     bool stopScroll = false;
     bool showTimestamp = true;
@@ -718,10 +730,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
     struct FilterState {
         bool sys, in_, sync;
-        bool out[4];
+        bool out[8];
         bool operator!=(const FilterState& o) const {
             return sys!=o.sys || in_!=o.in_ || sync!=o.sync ||
-                   out[0]!=o.out[0] || out[1]!=o.out[1] || out[2]!=o.out[2] || out[3]!=o.out[3];
+                   out[0]!=o.out[0] || out[1]!=o.out[1] || out[2]!=o.out[2] || out[3]!=o.out[3] ||
+                   out[4]!=o.out[4] || out[5]!=o.out[5] || out[6]!=o.out[6] || out[7]!=o.out[7];
         }
     };
     FilterState lastFilterState = {true, true, true, {true,true,true,true}};
@@ -741,6 +754,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 case LogSourceType::APP_OUT_2:   show = filterOut[1]; break;
                 case LogSourceType::APP_OUT_3:   show = filterOut[2]; break;
                 case LogSourceType::APP_OUT_4:   show = filterOut[3]; break;
+                case LogSourceType::APP_OUT_5:   show = filterOut[4]; break;
+                case LogSourceType::APP_OUT_6:   show = filterOut[5]; break;
+                case LogSourceType::APP_OUT_7:   show = filterOut[6]; break;
+                case LogSourceType::APP_OUT_8:   show = filterOut[7]; break;
             }
             if (!show) continue;
             for (const auto& e : g_logBySource[s]) {
@@ -755,7 +772,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         // Each source is individually capped ΓÇö no merged trim needed
         cachedSnapshot = std::move(merged);
         snapshotLogVersion = g_logVersion;
-        lastFilterState = {filterSys, filterIn, filterSync, {filterOut[0],filterOut[1],filterOut[2],filterOut[3]}};
+        lastFilterState = {filterSys, filterIn, filterSync, {filterOut[0],filterOut[1],filterOut[2],filterOut[3],filterOut[4],filterOut[5],filterOut[6],filterOut[7]}};
     };
 
     // Pre-declare lambda for Connect
@@ -771,25 +788,38 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         // Restart virtual MIDI ports if they were stopped
         if (GetSafeVirtualPortsOut().empty() && !g_virtualPortIn) {
             std::wstring wBaseName(baseNameStr.begin(), baseNameStr.end());
-            for (int i = 1; i <= 4; ++i) {
+            for (int i = 1; i <= 8; ++i) {
                 if (!g_portEnabled[i-1].load(std::memory_order_relaxed)) continue;
                 std::wstring portName = wBaseName + L" Out " + std::to_wstring(i);
                 ImVec4 cOut = colOut[i-1];
                 LogSourceType srcType = (LogSourceType)((int)LogSourceType::APP_OUT_1 + (i-1));
-                auto vport = std::make_unique<VirtualMidiPort>(portName,
-                    [i, cOut, srcType](const std::vector<uint8_t>& data) {
+                
+                auto rxCb = [i, cOut, srcType](const std::vector<uint8_t>& data) {
                         if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
                         bool isSync = (data.size() == 1 && data[0] >= 0xF8);
                         SendToSerial(i, data);
                         AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
-                    });
-                AddSafeVirtualPortOut(std::move(vport));
+                    };
+                
+                auto vport = std::make_unique<VirtualMidiPort>(portName, rxCb);
+                int retry = 2;
+                while (!vport->IsValid() && retry <= 10) {
+                    vport = std::make_unique<VirtualMidiPort>(portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
+                }
+                if (vport->IsValid()) AddSafeVirtualPortOut(std::move(vport));
+                else AddSafeVirtualPortOut(nullptr); // Preserve indices
+
                 ::Sleep(500); // Wait for Windows MIDI Services to commit each endpoint before registering the next.
                               // 150ms was too short — the async registration raced and ports appeared out of order.
             }
             if (g_portInEnabled.load(std::memory_order_relaxed)) {
                 std::wstring inPortName = wBaseName + L" In";
-                SetSafeVirtualPortIn(std::make_shared<VirtualMidiPort>(inPortName, nullptr));
+                auto vportIn = std::make_shared<VirtualMidiPort>(inPortName, nullptr);
+                int retry = 2;
+                while (!vportIn->IsValid() && retry <= 10) {
+                    vportIn = std::make_shared<VirtualMidiPort>(inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
+                }
+                if (vportIn->IsValid()) SetSafeVirtualPortIn(vportIn);
             }
             AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
         }
@@ -902,7 +932,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         if (GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
             connMsg << "Opened " << comName << " successfully.\n";
             connMsg << "Virtual ports:\n";
-            for (int i = 1; i <= 4; ++i) {
+            for (int i = 1; i <= 8; ++i) {
                 if (g_portEnabled[i-1].load(std::memory_order_relaxed))
                     connMsg << "  " << baseNameStr << " Out " << i << "\n";
             }
@@ -970,7 +1000,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             std::string baseNameCopy(baseNameBuf);
             bool autoStart = autoStartVirtualMidi;
             bool foundPort = foundSavedPort;
-            ImVec4 colOutCopy[4] = { colOut[0], colOut[1], colOut[2], colOut[3] };
+            ImVec4 colOutCopy[8];
+            for(int i=0; i<8; i++) colOutCopy[i] = colOut[i];
             ImVec4 colSysCopy = colSys;
             ImVec4 colInCopy  = colIn;
             std::vector<std::string> portsVecCopy = comPortsVec;
@@ -985,23 +1016,35 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 // ΓöÇΓöÇ Create virtual MIDI ports (if auto-start is enabled and MIDI is AVAILABLE) ΓöÇΓöÇ
                 if (midiOk && autoStart) {
                     std::wstring wBaseName(baseNameCopy.begin(), baseNameCopy.end());
-                    for (int i = 1; i <= 4; ++i) {
+                    for (int i = 1; i <= 8; ++i) {
                         if (!g_portEnabled[i-1].load(std::memory_order_relaxed)) continue;
                         std::wstring portName = wBaseName + L" Out " + std::to_wstring(i);
                         ImVec4 cOut = colOutCopy[i-1];
                         LogSourceType srcType = (LogSourceType)((int)LogSourceType::APP_OUT_1 + (i-1));
-                        auto vport = std::make_unique<VirtualMidiPort>(portName,
-                            [i, cOut, srcType](const std::vector<uint8_t>& data) {
+                        
+                        auto rxCb = [i, cOut, srcType](const std::vector<uint8_t>& data) {
                                 if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
                                 bool isSync = (data.size() == 1 && data[0] >= 0xF8);
                                 SendToSerial(i, data);
                                 AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
-                            });
-                        AddSafeVirtualPortOut(std::move(vport));
+                            };
+                            
+                        auto vport = std::make_unique<VirtualMidiPort>(portName, rxCb);
+                        int retry = 2;
+                        while (!vport->IsValid() && retry <= 10) {
+                            vport = std::make_unique<VirtualMidiPort>(portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
+                        }
+                        if (vport->IsValid()) AddSafeVirtualPortOut(std::move(vport));
+                        else AddSafeVirtualPortOut(nullptr); // Preserve indices
                     }
                     if (g_portInEnabled.load(std::memory_order_relaxed)) {
                         std::wstring inPortName = wBaseName + L" In";
-                        SetSafeVirtualPortIn(std::make_shared<VirtualMidiPort>(inPortName, nullptr));
+                        auto vportIn = std::make_shared<VirtualMidiPort>(inPortName, nullptr);
+                        int retry = 2;
+                        while (!vportIn->IsValid() && retry <= 10) {
+                            vportIn = std::make_shared<VirtualMidiPort>(inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
+                        }
+                        if (vportIn->IsValid()) SetSafeVirtualPortIn(vportIn);
                     }
                     AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
                 }
@@ -1132,7 +1175,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             float centerY = io.DisplaySize.y * 0.5f;
             
             // Move everything higher (Start higher than center)
-            float currentY = centerY - 100.0f;
+            float currentY = centerY - 160.0f;
 
             const char* msg = "Finalizing ToHost Bridge...";
             ImVec2 txtSz = ImGui::CalcTextSize(msg);
@@ -1175,7 +1218,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
                     // 1. Silence serial synths
                     if (isConnected && GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
-                        for (int p = 1; p <= 4; ++p) {
+                        for (int p = 1; p <= 8; ++p) {
                             std::vector<uint8_t> quiet;
                             for (int ch = 0; ch < 16; ++ch) quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
                             quiet.push_back(0xFC); // MIDI Stop
@@ -1307,51 +1350,63 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             // ΓöÇΓöÇ Connection Tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if (ImGui::BeginTabItem("Connection")) {
                 ImGui::Spacing();
-                bool portsRunning = !GetSafeVirtualPortsOut().empty();
-                
-                ImGui::BeginDisabled(isConnected);
-                if (ImGui::Button("Refresh COM Ports")) {
-                    comPortsVec = GetAvailableComPorts();
-                    comPorts.clear();
-                    for (const auto& p : comPortsVec) comPorts.push_back(p.c_str());
-                    selectedComPort = 0;
-                }
-                ImGui::EndDisabled();
-                ImGui::SameLine();
-                
-                ImGui::BeginDisabled(portsRunning || isConnected);
-                // Port Enables
-                {
-                    bool enIn = g_portInEnabled.load(std::memory_order_relaxed);
-                    if (ImGui::Checkbox("In##pe", &enIn)) g_portInEnabled.store(enIn, std::memory_order_relaxed);
-                    ImGui::SameLine();
-                    for (int p = 0; p < 4; ++p) {
-                        bool en = g_portEnabled[p].load(std::memory_order_relaxed);
-                        std::string lbl = "Out " + std::to_string(p+1) + "##pe";
-                        if (ImGui::Checkbox(lbl.c_str(), &en)) g_portEnabled[p].store(en, std::memory_order_relaxed);
-                        if (p < 3) ImGui::SameLine();
+
+                // --- TOP: MIDI Service Status / Errors (Highest Priority) ---
+                MidiServiceStatus currentStatus = g_midiStatus.load();
+                if (currentStatus == MidiServiceStatus::INITIALIZING) {
+                    ImGui::TextWrapped("Checking MIDI Service...");
+                    ImGui::Separator();
+                } else if (currentStatus == MidiServiceStatus::NOT_RESPONDING || currentStatus == MidiServiceStatus::UNAVAILABLE) {
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 1.0f));
+                    ImGui::BeginChild("MidiError", ImVec2(0, 100 * main_scale), true); // Fixed height for top placement
+                    if (currentStatus == MidiServiceStatus::NOT_RESPONDING) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "CRITICAL ERROR: Windows MIDI Service is not responding.");
+                        ImGui::TextWrapped("Recommendation: Restart computer or stop 'MidiSrv.exe'.");
+                        if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
+                    } else {
+                        ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "ERROR: Windows MIDI Services Runtime is missing.");
+                        if (ImGui::Button("Download Installer")) ShellExecuteA(NULL, "open", "https://microsoft.github.io/MIDI/get-latest/", NULL, NULL, SW_SHOWNORMAL);
                     }
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor();
+                    ImGui::Separator();
                 }
 
-                ImGui::SetNextItemWidth(150);
+                bool portsRunning = !GetSafeVirtualPortsOut().empty();
+
+                ImGui::Columns(2, "ConnectionSplit", true);
+                ImGui::SetColumnWidth(0, 263 * main_scale); 
+
+                // --- LEFT COLUMN: Configuration & Connectivity ---
+                ImGui::BeginDisabled(portsRunning || isConnected);
+                ImGui::SetNextItemWidth(120 * main_scale); // Reduced from 150
                 if (ImGui::InputText("Virtual Port Name", baseNameBuf, 128)) {
                     SaveSettings("", baseNameBuf, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
                 }
-                
                 ImGui::EndDisabled();
 
                 ImGui::Spacing();
-                
                 bool disableComSelect = isConnected || comPorts.empty();
                 if (disableComSelect) ImGui::BeginDisabled();
-                ImGui::SetNextItemWidth(120);
+                ImGui::SetNextItemWidth(80 * main_scale); // 2/3 of previous 120
                 ImGui::Combo("COM Port", &selectedComPort, comPorts.empty() ? nullptr : comPorts.data(), (int)comPorts.size());
                 if (disableComSelect) ImGui::EndDisabled();
+
+                ImGui::SameLine();
+                ImGui::BeginDisabled(isConnected);
+                if (ImGui::Button("Refresh", ImVec2(80 * main_scale, 0))) { // Slightly wider Refresh button
+                    comPortsVec = GetAvailableComPorts();
+                    comPorts.clear();
+                    for (const auto& p : comPortsVec) comPorts.push_back(p.c_str());
+                }
+                ImGui::EndDisabled();
 
                 ImGui::Spacing();
                 bool disableConnect = isConnected || g_isConnecting.load() || g_midiStatus.load() != MidiServiceStatus::AVAILABLE;
                 ImGui::BeginDisabled(disableConnect);
-                if (ImGui::Button(isConnected ? "Connected" : "Connect", ImVec2(120, 30)) && !comPorts.empty()) {
+                // Connect button takes full column width when not connected
+                float connBtnWidth = isConnected ? 120 * main_scale : -1.0f;
+                if (ImGui::Button(isConnected ? "Connected" : "Connect", ImVec2(connBtnWidth, 30 * main_scale))) {
                     if (!isConnected && !g_isConnecting.load()) {
                         if (g_midiStatus.load() != MidiServiceStatus::AVAILABLE) {
                             connectionStatus = "Cannot connect: Windows MIDI Service is not responding.";
@@ -1365,11 +1420,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                                     ConnectPort();
                                     portOpDone.store(true);
                                 });
-                                
                                 auto start = std::chrono::steady_clock::now();
                                 while (!portOpDone.load()) {
                                     if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 10) {
-                                        // TIMEOUT - assume MIDI service is hung/broken
                                         g_midiStatus.store(MidiServiceStatus::NOT_RESPONDING);
                                         connectionStatus = "Cannot connect: Windows MIDI Service is not responding.";
                                         AddLog(LogSourceType::APP_INFO, "Connection timed out after 10s (MIDI Service hang).");
@@ -1386,11 +1439,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     }
                 }
                 ImGui::EndDisabled();
-                
-                // Disconnect button
+
                 if (isConnected) {
                     ImGui::SameLine();
-                    if (ImGui::Button("Disconnect", ImVec2(120, 30))) {
+                    if (ImGui::Button("Disconnect", ImVec2(120 * main_scale, 30))) {
                         ResetSafeSerialPort();
                         g_lastSentPort.store(0, std::memory_order_relaxed);
                         isConnected = false;
@@ -1400,53 +1452,181 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     }
                 }
 
+                // --- Status Messages (Moved to Bottom) ---
+
+                // --- RIGHT COLUMN: Active Ports ---
+                ImGui::NextColumn();
                 ImGui::Spacing();
+
+                ImGui::BeginDisabled(portsRunning || isConnected);
+                {
+                    // 3 Rows of 3 Checkboxes (Total 9)
+                    for (int row = 0; row < 3; ++row) {
+                        for (int col = 0; col < 3; ++col) {
+                            int idx = row * 3 + col;
+                            if (idx < 8) {
+                                // Output Ports 1-8
+                                bool en = g_portEnabled[idx].load(std::memory_order_relaxed);
+                                std::string lbl = "Out " + std::to_string(idx+1) + "##pe";
+                                if (ImGui::Checkbox(lbl.c_str(), &en)) g_portEnabled[idx].store(en, std::memory_order_relaxed);
+                            } else {
+                                // Input Port (9th slot)
+                                bool enIn = g_portInEnabled.load(std::memory_order_relaxed);
+                                if (ImGui::Checkbox("In##pe"   , &enIn))  g_portInEnabled.store(enIn, std::memory_order_relaxed);
+                            }
+                            if (col < 2) ImGui::SameLine();
+                        }
+                    }
+                }
+                ImGui::EndDisabled();
+
+                ImGui::Columns(1);
                 ImGui::Separator();
-                ImGui::Spacing();
+
+                // --- BOTTOM: Connection Status & Extras ---
                 
-                // Moved MIDI Service Errors to right under the separator
-                MidiServiceStatus currentStatus = g_midiStatus.load();
-                if (currentStatus == MidiServiceStatus::INITIALIZING) {
-                    ImGui::TextWrapped("Checking MIDI Service...");
-                } else if (currentStatus == MidiServiceStatus::NOT_RESPONDING || currentStatus == MidiServiceStatus::UNAVAILABLE) {
-                    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 1.0f));
-                    ImGui::BeginChild("MidiError", ImVec2(0, ImGui::GetContentRegionAvail().y), true);
-                    if (currentStatus == MidiServiceStatus::NOT_RESPONDING) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "CRITICAL ERROR: Windows MIDI Service is not responding.");
-                        ImGui::TextWrapped("The Windows MIDI Services process (MidiSrv.exe) appears to be hung. This application will not be able to create virtual MIDI ports.");
-                        ImGui::TextWrapped("RECOMMENDATION: Please restart your computer or stop 'MidiSrv.exe' in Task Manager.");
-                        if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
+                float footerHeight = 0.0f;
+                if (isConnected) footerHeight = 52.0f * main_scale;
+
+                // Detailed Manual Stop Progress (checklist style)
+                if (g_isManualStopping.load()) {
+                    ImGui::BeginChild("ManualStopTasks", ImVec2(0, -(footerHeight + 4.0f * main_scale)), true);
+                    
+                    std::lock_guard<std::mutex> lock(g_shutdownMutex);
+                    for (const auto& task : g_manualStopTasks) {
+                        ImVec4 color = (task.status == "OK") ? ImVec4(0.4f, 1.0f, 0.4f, 1.0f) : (task.status == "..." ? ImVec4(1.0f, 1.0f, 0.0f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                        ImGui::Text("%s", task.name.c_str());
+                        ImGui::SameLine(220.0f * main_scale);
+                        ImGui::TextColored(color, "[ %s ]", task.status.c_str());
+                    }
+                    ImGui::EndChild();
+                } else if (!isConnected && !GetSafeVirtualPortsOut().empty()) {
+                    ImGui::Spacing();
+                    ImGui::BeginDisabled(g_isConnecting.load());
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f, 0.3f, 0.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.4f, 0.0f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.5f, 0.2f, 0.0f, 1.0f));
+                    if (ImGui::Button("Stop Virtual Ports", ImVec2(-1, 28 * main_scale))) {
+                        std::thread([&]() {
+                            g_isConnecting.store(true);
+                            g_isManualStopping.store(true);
+                            
+                            std::vector<std::thread> cleanThreads;
+                            std::vector<int> validOutIndices;
+                            bool hasVirtualIn = false;
+                            {
+                                std::lock_guard<std::mutex> lock(g_shutdownMutex);
+                                g_manualStopTasks.clear();
+                                auto outs = GetSafeVirtualPortsOut();
+                                for (int i = 0; i < (int)outs.size(); ++i) {
+                                    if (outs[i]) {
+                                        g_manualStopTasks.push_back({"Close Virtual Out " + std::to_string(i+1), "Pending"});
+                                        validOutIndices.push_back(i);
+                                    }
+                                }
+                                if (GetSafeVirtualPortIn()) {
+                                    g_manualStopTasks.push_back({"Close Virtual In", "Pending"});
+                                    hasVirtualIn = true;
+                                }
+                            }
+
+                            int tIdx = 0;
+                            for (int i : validOutIndices) {
+                                int curIdx = tIdx; // capture current task index
+                                cleanThreads.emplace_back([i, curIdx]() {
+                                    { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_manualStopTasks[curIdx].status = "..."; }
+                                    ResetSafeVirtualPortsOutIndex(i);
+                                    { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_manualStopTasks[curIdx].status = "OK"; }
+                                });
+                                ::Sleep(1000); // 1s stagger like in shutdown logic
+                                tIdx++;
+                            }
+                            if (hasVirtualIn) {
+                                int curIdx = tIdx;
+                                cleanThreads.emplace_back([curIdx]() {
+                                    { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_manualStopTasks[curIdx].status = "..."; }
+                                    ResetSafeVirtualPortIn();
+                                    { std::lock_guard<std::mutex> lock(g_shutdownMutex); g_manualStopTasks[curIdx].status = "OK"; }
+                                });
+                                ::Sleep(1000);
+                            }
+
+                            for (auto& t : cleanThreads) if (t.joinable()) t.join();
+                            
+                            ClearSafeVirtualPortsOut();
+                            connectionStatus = "Disconnected.";
+                            AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.");
+                            g_isManualStopping.store(false);
+                            g_isConnecting.store(false);
+                        }).detach();
+                    }
+                    ImGui::PopStyleColor(3);
+                    ImGui::EndDisabled();
+                    ImGui::Spacing();
+                }
+
+                if (!g_isManualStopping.load()) {
+                    ImGui::BeginChild("StatusScrollArea", ImVec2(0, -footerHeight), false, ImGuiWindowFlags_None);
+                    if (g_isConnecting.load()) {
+                        ImGui::TextWrapped("%s", connectionStatus.empty() ? "Connecting..." : connectionStatus.c_str());
+                    } else if (connectionLost.load()) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "COM port disconnected!");
                     } else {
-                        ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "ERROR: Windows MIDI Services Runtime is missing.");
-                        ImGui::TextWrapped("ToHost Bridge requires the Windows MIDI Services (MIDI 2.0) runtime for virtual ports and reliable MIDI communication.");
-                        if (ImGui::Button("Download Windows MIDI Services (x64 Installer)")) {
-                            ShellExecuteA(NULL, "open", "https://microsoft.github.io/MIDI/get-latest/#:~:text=Download%20Latest%20x64%20Installer", NULL, NULL, SW_SHOWNORMAL);
+                        if (isConnected) {
+                            // Discover active ports from settings (which are disabled/locked while connected)
+                            std::string outsDisp;
+                            for (int i = 1; i <= 8; ++i) {
+                                if (g_portEnabled[i-1].load()) {
+                                    if (!outsDisp.empty()) outsDisp += ", ";
+                                    outsDisp += "Out " + std::to_string(i);
+                                }
+                            }
+                            if (outsDisp.empty()) outsDisp = "None";
+                            std::string inDisp = g_portInEnabled.load() ? "In" : "None";
+
+                            // Row 1: Connected Message
+                            std::string succMsg = "Opened " + activeComName + " successfully.";
+                            ImGui::Text("%s", succMsg.c_str());
+
+                            // Row 2: Serial Charge
+                            char chargeBuf[64];
+                            sprintf(chargeBuf, "Serial charge: %3.0f%%", g_chargePercent);
+                            ImVec4 chargeCol = lightUI ? ImVec4(0.0f, 0.45f, 0.0f, 1.0f) : ImVec4(0.6f, 1.0f, 0.6f, 1.0f);
+                            ImGui::TextColored(chargeCol, "%s", chargeBuf);
+
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            ImGui::Spacing();
+
+                            float alignOffset = ImGui::CalcTextSize("Virtual outputs: ").x + 10.0f;
+
+                            // Row 3: Virtual Outputs
+                            ImGui::TextColored(lightUI ? ImVec4(0.3f, 0.3f, 0.3f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Virtual outputs:");
+                            ImGui::SameLine(alignOffset); 
+                            ImGui::TextWrapped("%s", outsDisp.c_str());
+
+                            // Row 4: Virtual Inputs
+                            ImGui::TextColored(lightUI ? ImVec4(0.3f, 0.3f, 0.3f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Virtual inputs:");
+                            ImGui::SameLine(alignOffset); 
+                            ImGui::TextWrapped("%s", inDisp.c_str());
+                        } else {
+                            ImGui::TextWrapped("%s", connectionStatus.c_str());
                         }
                     }
                     ImGui::EndChild();
-                    ImGui::PopStyleColor();
-                } else if (g_isConnecting.load()) {
-                    ImGui::TextWrapped("Connecting...");
-                } else if (connectionLost.load()) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "COM port disconnected!");
                 } else {
-                    ImGui::TextWrapped("%s", connectionStatus.c_str());
+                    ImGui::Dummy(ImVec2(0, footerHeight));
                 }
-                if (isConnected) {
-                    // Refined 'Hunter Green' for Light UI (darker for contrast), bright green for Dark UI
-                    ImVec4 chargeCol = lightUI ? ImVec4(0.0f, 0.45f, 0.0f, 1.0f) : ImVec4(0.6f, 1.0f, 0.6f, 1.0f);
-                    ImGui::TextColored(chargeCol, "Serial charge: %.0f%%", g_chargePercent);
 
-                    ImGui::Spacing();
-                    ImGui::Separator();
+                if (isConnected) {
                     ImGui::Spacing();
                     
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.9f, 0.2f, 0.2f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.0f, 0.0f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)); // Force white text for readability
-                    if (ImGui::Button("Panic! (All Notes Off)", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f, 30))) {
-                        for (int p = 1; p <= 4; ++p) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    if (ImGui::Button("Panic! (All Notes Off)", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f, 30 * main_scale))) {
+                        for (int p = 1; p <= 8; ++p) {
                             std::vector<uint8_t> pData;
                             for (int ch = 0; ch < 16; ++ch) {
                                 pData.insert(pData.end(), { (uint8_t)(0xB0 | ch), 120, 0 });
@@ -1463,9 +1643,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.3f, 0.6f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.4f, 0.8f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.0f, 0.2f, 0.5f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f)); // Force white text for readability
-                    if (ImGui::Button("XG Reset", ImVec2(-1, 30))) {
-                        for (int p = 1; p <= 4; ++p) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                    if (ImGui::Button("XG Reset", ImVec2(-1, 30 * main_scale))) {
+                        for (int p = 1; p <= 8; ++p) {
                             if (!g_portEnabled[p-1].load()) continue;
                             std::vector<uint8_t> resetMsg = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7 };
                             SendToSerial(p, resetMsg);
@@ -1475,27 +1655,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     ImGui::PopStyleColor(4);
                 }
 
-                // Stop Virtual Ports button ΓÇö show when not connected but ports are alive
-                if (!isConnected && !GetSafeVirtualPortsOut().empty()) {
-                    ImGui::Spacing();
-                    ImGui::BeginDisabled(g_isConnecting.load());
-                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.6f, 0.3f, 0.0f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.4f, 0.0f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.5f, 0.2f, 0.0f, 1.0f));
-                    if (ImGui::Button("Stop Virtual Ports", ImVec2(-1, 28))) {
-                        g_isConnecting.store(true);
-                        std::thread([&]() {
-                            ClearSafeVirtualPortsOut();
-                            ResetSafeVirtualPortIn();
-                            connectionStatus = "Disconnected.";
-                            AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.");
-                            g_isConnecting.store(false);
-                        }).detach();
-                    }
-                    ImGui::PopStyleColor(3);
-                    ImGui::EndDisabled();
-                }
-
                 // MIDI Service error block moved up
 
                 ImGui::EndTabItem();
@@ -1503,23 +1662,46 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
             // ΓöÇΓöÇ Debug View Tab ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             if (ImGui::BeginTabItem("Debug View")) {
+                static bool showDebugFilters = false;
                 ImGui::Spacing();
-                // Filters Row 1
-                ImGui::Checkbox("In", &filterIn); ImGui::SameLine();
-                ImGui::Checkbox("Out 1", &filterOut[0]); ImGui::SameLine();
-                ImGui::Checkbox("Out 2", &filterOut[1]); ImGui::SameLine();
-                ImGui::Checkbox("Out 3", &filterOut[2]); ImGui::SameLine();
-                ImGui::Checkbox("Out 4", &filterOut[3]); ImGui::SameLine();
-                ImGui::Checkbox("Timestamp", &showTimestamp); 
-                // Filters Row 2
-                ImGui::Checkbox("System Info", &filterSys); ImGui::SameLine();
-                ImGui::Checkbox("Filter Sync", &filterSync); ImGui::SameLine();
-                bool stopScrollPrev = stopScroll;
-                ImGui::Checkbox("Stop Scroll", &stopScroll); ImGui::SameLine();
-                ImGui::Checkbox("Info", &showNames);
-                ImGui::Separator();
+                
+                if (showDebugFilters) {
+                    ImGui::Columns(2, "DebugFiltersSplit", true);
+                    ImGui::SetColumnWidth(0, 263 * main_scale); // Match connection tab
 
-                FilterState currentFilter = {filterSys, filterIn, filterSync, {filterOut[0],filterOut[1],filterOut[2],filterOut[3]}};
+                    // LEFT COLUMN: Ports (3x3)
+                    for (int row = 0; row < 3; ++row) {
+                        for (int col = 0; col < 3; ++col) {
+                            int idx = row * 3 + col;
+                            if (idx < 8) {
+                                std::string lbl = "Out " + std::to_string(idx+1) + "##df";
+                                ImGui::Checkbox(lbl.c_str(), &filterOut[idx]);
+                            } else {
+                                ImGui::Checkbox("In##df", &filterIn);
+                            }
+                            if (col < 2) ImGui::SameLine();
+                        }
+                    }
+
+                    ImGui::NextColumn();
+
+                    // RIGHT COLUMN: Controls (3 rows)
+                    // Row 1
+                    ImGui::Checkbox("System Info", &filterSys); ImGui::SameLine();
+                    ImGui::Checkbox("Filter Sync", &filterSync);
+                    
+                    // Row 2
+                    ImGui::Checkbox("Timestamp", &showTimestamp); ImGui::SameLine();
+                    ImGui::Checkbox("Description", &showNames);
+                    
+                    // Row 3
+                    ImGui::Checkbox("Stop Scroll", &stopScroll);
+
+                    ImGui::Columns(1);
+                    ImGui::Separator();
+                }
+
+                FilterState currentFilter = {filterSys, filterIn, filterSync, {filterOut[0],filterOut[1],filterOut[2],filterOut[3],filterOut[4],filterOut[5],filterOut[6],filterOut[7]}};
                 size_t currentLogVersion;
                 {
                     std::lock_guard<std::mutex> lock(g_logMutex);
@@ -1585,6 +1767,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                             case LogSourceType::APP_OUT_2:   drawCol = colOut[1]; break;
                             case LogSourceType::APP_OUT_3:   drawCol = colOut[2]; break;
                             case LogSourceType::APP_OUT_4:   drawCol = colOut[3]; break;
+                            case LogSourceType::APP_OUT_5:   drawCol = colOut[4]; break;
+                            case LogSourceType::APP_OUT_6:   drawCol = colOut[5]; break;
+                            case LogSourceType::APP_OUT_7:   drawCol = colOut[6]; break;
+                            case LogSourceType::APP_OUT_8:   drawCol = colOut[7]; break;
                             default: drawCol = ImVec4(1,1,1,1); break;
                         }
 
@@ -1612,7 +1798,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     cachedSnapshot.clear();
                     frozenSnapshot.clear();
                 }
-            ImGui::SameLine();
+                ImGui::SameLine();
+                if (ImGui::Button(showDebugFilters ? "Hide filters" : "Show filters")) {
+                    showDebugFilters = !showDebugFilters;
+                }
+                ImGui::SameLine();
             if (ImGui::Button("Get synth info")) {
                 if (GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
                     std::vector<uint8_t> stdId = { 0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7 };
@@ -1681,6 +1871,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         colOut[1] = ImVec4(0.65f, 0.30f, 0.00f, 1.00f); // Deep orange
                         colOut[2] = ImVec4(0.00f, 0.50f, 0.00f, 1.00f); // Deep green
                         colOut[3] = ImVec4(0.50f, 0.00f, 0.50f, 1.00f); // Purple
+                        colOut[4] = ImVec4(0.00f, 0.40f, 0.40f, 1.00f); // Teal
+                        colOut[5] = ImVec4(0.00f, 0.00f, 0.60f, 1.00f); // Dark blue
+                        colOut[6] = ImVec4(0.60f, 0.00f, 0.30f, 1.00f); // Deep pink
+                        colOut[7] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f); // Black
                     } else {
                         ImGui::StyleColorsDark();
                         // Restore Vibrant Dark Mode Defaults
@@ -1690,6 +1884,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         colOut[1] = ImVec4(1.00f, 0.80f, 0.40f, 1.00f);
                         colOut[2] = ImVec4(0.40f, 1.00f, 0.40f, 1.00f);
                         colOut[3] = ImVec4(0.80f, 0.40f, 1.00f, 1.00f);
+                        colOut[4] = ImVec4(0.40f, 1.00f, 1.00f, 1.00f);
+                        colOut[5] = ImVec4(0.40f, 0.40f, 1.00f, 1.00f);
+                        colOut[6] = ImVec4(1.00f, 0.40f, 1.00f, 1.00f);
+                        colOut[7] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
                     }
                     settingsChanged = true;
                 }
@@ -1714,25 +1912,32 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 ImGui::Text("Debug View Colors");
                 ImGui::Spacing();
                 
-                ImGui::Columns(3, nullptr, false);
-                ImGui::SetColumnWidth(0, 110 * main_scale);
-                ImGui::SetColumnWidth(1, 110 * main_scale);
-                ImGui::SetColumnWidth(2, 110 * main_scale);
+                ImGui::Columns(5, nullptr, false);
+                float colWidth = 100 * main_scale;
+                for (int i=0; i<5; i++) ImGui::SetColumnWidth(i, colWidth);
                 
-                // Row 1
+                // Row 1: Out 1, 2, 3, 4, COM Input
                 if (ImGui::ColorEdit4("Out 1", (float*)&colOut[0], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
+                ImGui::NextColumn();
+                if (ImGui::ColorEdit4("Out 2", (float*)&colOut[1], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
                 ImGui::NextColumn();
                 if (ImGui::ColorEdit4("Out 3", (float*)&colOut[2], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
                 ImGui::NextColumn();
-                if (ImGui::ColorEdit4("COM Input", (float*)&colIn, ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
-                ImGui::NextColumn();
-                
-                // Row 2
-                if (ImGui::ColorEdit4("Out 2", (float*)&colOut[1], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
-                ImGui::NextColumn();
                 if (ImGui::ColorEdit4("Out 4", (float*)&colOut[3], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
                 ImGui::NextColumn();
-                if (ImGui::ColorEdit4("System Info", (float*)&colSys, ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
+                if (ImGui::ColorEdit4("In", (float*)&colIn, ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
+                ImGui::NextColumn();
+                
+                // Row 2: Out 5, 6, 7, 8, System Info
+                if (ImGui::ColorEdit4("Out 5", (float*)&colOut[4], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
+                ImGui::NextColumn();
+                if (ImGui::ColorEdit4("Out 6", (float*)&colOut[5], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
+                ImGui::NextColumn();
+                if (ImGui::ColorEdit4("Out 7", (float*)&colOut[6], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
+                ImGui::NextColumn();
+                if (ImGui::ColorEdit4("Out 8", (float*)&colOut[7], ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
+                ImGui::NextColumn();
+                if (ImGui::ColorEdit4("System", (float*)&colSys, ImGuiColorEditFlags_NoInputs)) settingsChanged = true;
                 
                 ImGui::Columns(1);
 
@@ -1765,7 +1970,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
     // Exit Cleanup: Silence all and stop playback
     if (isConnected && GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
-        for (int p = 1; p <= 4; ++p) {
+        for (int p = 1; p <= 8; ++p) {
             std::vector<uint8_t> quiet;
             for (int ch = 0; ch < 16; ++ch) {
                 quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
@@ -1905,7 +2110,7 @@ void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
 
     // Yamaha Multiplexing (Serial TO HOST protocol):
     // Prepend 0xF5 <port> if we are switching from a different virtual port.
-    // 1-indexed ports: 1-4
+    // 1-indexed ports: 1-8
     if (g_lastSentPort.load(std::memory_order_relaxed) != portIdx) {
         mux.push_back(0xF5);
         mux.push_back((uint8_t)portIdx);

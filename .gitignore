@@ -21,6 +21,7 @@ nuget.exe
 *.ps1
 *.vbs
 *.msix
+*.txt
 
 # Assets
 app.png

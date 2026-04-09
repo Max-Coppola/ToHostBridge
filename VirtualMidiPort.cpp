@@ -55,6 +55,16 @@ VirtualMidiPort::VirtualMidiPort(const std::wstring& portName, MidiRxCallback rx
         m_virtualDevice = nullptr;
         m_connection = nullptr;
         m_session = nullptr;
+    } catch (std::exception const& ex) {
+        std::wcerr << L"STD Error creating virtual MIDI port " << portName << L": " << ex.what() << std::endl;
+        m_virtualDevice = nullptr;
+        m_connection = nullptr;
+        m_session = nullptr;
+    } catch (...) {
+        std::wcerr << L"Unknown error creating virtual MIDI port " << portName << std::endl;
+        m_virtualDevice = nullptr;
+        m_connection = nullptr;
+        m_session = nullptr;
     }
 }
 
