@@ -14,6 +14,8 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <condition_variable>
+#include <unordered_set>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.ApplicationModel.h>
@@ -21,6 +23,7 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <shobjidl.h> // For IInitializeWithWindow
 #include <winmidi/init/Microsoft.Windows.Devices.Midi2.Initialization.hpp>
+#include <winrt/Microsoft.Windows.Devices.Midi2.Endpoints.Virtual.h>
 
 #include "SerialPort.h"
 #include "VirtualMidiPort.h"
@@ -162,6 +165,26 @@ std::atomic<bool> g_autoGetSynthInfo{true};
 
 enum class MidiServiceStatus { INITIALIZING, AVAILABLE, UNAVAILABLE, NOT_RESPONDING };
 std::atomic<MidiServiceStatus> g_midiStatus{MidiServiceStatus::INITIALIZING};
+
+// Active Device Watcher Synchronization
+std::mutex g_creationMutex;
+std::condition_variable g_creationCv;
+std::unordered_set<std::wstring> g_arrivedDevices; // Stores DeviceId seen by watcher
+winrt::Microsoft::Windows::Devices::Midi2::MidiEndpointDeviceWatcher g_watcher{ nullptr };
+winrt::event_token g_watcherAddedToken;
+std::unique_ptr<Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer> g_midiSdkInitializer;
+
+void WaitForDeviceArrival(winrt::hstring deviceId, int timeoutMs = 2000) {
+    if (deviceId.empty()) return;
+    std::wstring id = deviceId.c_str();
+    std::unique_lock<std::mutex> lock(g_creationMutex);
+    bool success = g_creationCv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&]() {
+        return g_arrivedDevices.find(id) != g_arrivedDevices.end();
+    });
+    if (!success) {
+        // Log timeout warning if needed
+    }
+}
 std::atomic<bool> midiAvailable{false};
 
 std::mutex g_synthNameOverlayMutex;
@@ -540,6 +563,10 @@ winrt::fire_and_forget CheckForUpdatesAsync(HWND hwnd) {
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
+    auto g_appStartTime = std::chrono::steady_clock::now();
+
+
+
     // Parse command line for --mock-update
     int argc;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -554,9 +581,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     // 0. Startup Virtual Port Cleanup (To handle prior crashes)
     VirtualMidiPort::RemoveStalePorts();
     
-
     HANDLE hMutex = CreateMutexW(NULL, TRUE, L"ToHostBridgeInstanceMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::wcout << L"Error: Another instance of ToHost Bridge is already running (Mutex exists). Exiting." << std::endl;
         HWND hExisting = FindWindowW(L"ToHostBridge", nullptr);
         if (hExisting) {
             ShowWindow(hExisting, SW_RESTORE);
@@ -567,32 +594,50 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
     winrt::init_apartment();
     
-    // Asynchronous MIDI Service Initialization with 5-second timeout
+    // Asynchronous MIDI Service Initialization with 15-second timeout
     std::thread midiInitThread([]() {
-        Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer midiInit;
-        bool sdkAvailable = midiInit.InitializeSdkRuntime() && midiInit.EnsureServiceAvailable();
+        winrt::init_apartment();
+        g_midiSdkInitializer = std::make_unique<Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer>();
+        bool sdkAvailable = g_midiSdkInitializer->InitializeSdkRuntime() && g_midiSdkInitializer->EnsureServiceAvailable();
         
         if (sdkAvailable) {
             midiAvailable.store(true);
             g_midiStatus.store(MidiServiceStatus::AVAILABLE);
+
+            // Setup and start the active device watcher
+            try {
+                using namespace winrt::Microsoft::Windows::Devices::Midi2;
+                g_watcher = MidiEndpointDeviceWatcher::Create();
+                if (g_watcher) {
+                    g_watcherAddedToken = g_watcher.Added([](MidiEndpointDeviceWatcher const&, MidiEndpointDeviceInformationAddedEventArgs const& args) {
+                        if (!args || !args.AddedDevice()) return;
+                        std::lock_guard<std::mutex> lock(g_creationMutex);
+                        g_arrivedDevices.insert(args.AddedDevice().EndpointDeviceId().c_str());
+                        g_creationCv.notify_all();
+                    });
+                    g_watcher.Start();
+                }
+            } catch (...) {
+                // If watcher fails, we'll fall back to timeout logic
+            }
         } else {
             midiAvailable.store(false);
             g_midiStatus.store(MidiServiceStatus::UNAVAILABLE);
         }
     });
+    midiInitThread.detach();
 
-    // Detach and wait for status change with timeout
-    std::thread([midiInitThread = std::move(midiInitThread)]() mutable {
+    // Wait for status change with timeout (on a separate thread)
+    std::thread([]() {
         auto start = std::chrono::steady_clock::now();
         while (g_midiStatus.load() == MidiServiceStatus::INITIALIZING) {
-            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 5) {
+            if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 15) {
                 g_midiStatus.store(MidiServiceStatus::NOT_RESPONDING);
                 midiAvailable.store(false);
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        if (midiInitThread.joinable()) midiInitThread.detach(); // We let the init thread finish or hang on its own
     }).detach();
 
 
@@ -602,7 +647,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), nullptr, nullptr, nullptr, L"ToHostBridge", LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) };
     ::RegisterClassExW(&wc);
     // Adjusted window dimensions for bold headers and better spacing
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.2.2", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.3.0", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
     // Initial check for Microsoft Store updates
     CheckForUpdatesAsync(hwnd);
@@ -704,13 +749,23 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     bool isConnected = false;
     std::atomic<bool> connectionLost{false};
     std::string activeComName = savedComName;
+    std::mutex connStatusMutex;
     std::string connectionStatus = "";
+    
+    auto SetConnStatus = [&](const std::string& s) {
+        std::lock_guard<std::mutex> lock(connStatusMutex);
+        connectionStatus = s;
+    };
+    auto GetConnStatus = [&]() -> std::string {
+        std::lock_guard<std::mutex> lock(connStatusMutex);
+        return connectionStatus;
+    };
 
     // Startup: if saved port not present yet, mark as waiting
     if (autoStartVirtualMidi && !savedComName.empty() && !foundSavedPort) {
         connectionLost.store(true);
         activeComName = savedComName;
-        connectionStatus = "Waiting for " + savedComName + "...";
+        SetConnStatus("Waiting for " + savedComName + "...");
     }
 
     // Filters
@@ -775,8 +830,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         lastFilterState = {filterSys, filterIn, filterSync, {filterOut[0],filterOut[1],filterOut[2],filterOut[3],filterOut[4],filterOut[5],filterOut[6],filterOut[7]}};
     };
 
-    // Pre-declare lambda for Connect
-    auto ConnectPort = [&]() -> bool {
+    // std::function allows recursive/forward reference capture without 'own initializer' errors
+    std::function<bool()> ConnectPort;
+    ConnectPort = [&]() -> bool {
         if (isConnected || g_midiStatus.load() != MidiServiceStatus::AVAILABLE) return false;
         if (comPorts.empty()) return false;
         std::string baseNameStr(baseNameBuf);
@@ -788,6 +844,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         // Restart virtual MIDI ports if they were stopped
         if (GetSafeVirtualPortsOut().empty() && !g_virtualPortIn) {
             std::wstring wBaseName(baseNameStr.begin(), baseNameStr.end());
+            std::string currentlyOpened = "";
             for (int i = 1; i <= 8; ++i) {
                 if (!g_portEnabled[i-1].load(std::memory_order_relaxed)) continue;
                 std::wstring portName = wBaseName + L" Out " + std::to_wstring(i);
@@ -801,26 +858,41 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
                     };
                 
+                std::string dispCurrent = currentlyOpened;
+                if (!dispCurrent.empty()) dispCurrent += ", ";
+                SetConnStatus(dispCurrent + "Opening Out " + std::to_string(i) + "...");
+                
                 auto vport = std::make_unique<VirtualMidiPort>(portName, rxCb);
                 int retry = 2;
                 while (!vport->IsValid() && retry <= 10) {
                     vport = std::make_unique<VirtualMidiPort>(portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
                 }
-                if (vport->IsValid()) AddSafeVirtualPortOut(std::move(vport));
+                if (vport->IsValid()) {
+                    winrt::hstring deviceId = vport->GetDeviceId();
+                    AddSafeVirtualPortOut(std::move(vport));
+                    WaitForDeviceArrival(deviceId); // Wait for PnP arrival
+                }
                 else AddSafeVirtualPortOut(nullptr); // Preserve indices
 
-                ::Sleep(500); // Wait for Windows MIDI Services to commit each endpoint before registering the next.
-                              // 150ms was too short — the async registration raced and ports appeared out of order.
+                if (!currentlyOpened.empty()) currentlyOpened += ", ";
+                currentlyOpened += "Out " + std::to_string(i);
             }
             if (g_portInEnabled.load(std::memory_order_relaxed)) {
                 std::wstring inPortName = wBaseName + L" In";
+                std::string outFinished = currentlyOpened;
+                SetConnStatus(outFinished + "|Opening MIDI In ...");
                 auto vportIn = std::make_shared<VirtualMidiPort>(inPortName, nullptr);
                 int retry = 2;
                 while (!vportIn->IsValid() && retry <= 10) {
                     vportIn = std::make_shared<VirtualMidiPort>(inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
                 }
-                if (vportIn->IsValid()) SetSafeVirtualPortIn(vportIn);
+                if (vportIn->IsValid()) {
+                    winrt::hstring deviceId = vportIn->GetDeviceId();
+                    SetSafeVirtualPortIn(vportIn);
+                    WaitForDeviceArrival(deviceId); // Wait for PnP arrival
+                }
             }
+            SetConnStatus(""); // Clear progress text
             AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
         }
         
@@ -928,19 +1000,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         // Reset port running-status so the receiver re-syncs on (re)connect
         g_lastSentPort.store(0, std::memory_order_relaxed);
 
-        std::stringstream connMsg;
         if (GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
-            connMsg << "Opened " << comName << " successfully.\n";
-            connMsg << "Virtual ports:\n";
-            for (int i = 1; i <= 8; ++i) {
-                if (g_portEnabled[i-1].load(std::memory_order_relaxed))
-                    connMsg << "  " << baseNameStr << " Out " << i << "\n";
-            }
-            if (g_portInEnabled.load(std::memory_order_relaxed))
-                connMsg << "  " << baseNameStr << " In\n";
             AddLog(LogSourceType::APP_INFO, "Connected to " + comName + " (" + baseNameStr + ")");
             isConnected = true;
             connectionLost = false;
+            g_midiStatus.store(MidiServiceStatus::AVAILABLE);
 
             // Auto-trigger Synth Identity Discovery on connect (if enabled)
             if (GetSafeSerialPort() && GetSafeSerialPort()->IsOpen() && g_autoGetSynthInfo.load()) {
@@ -956,7 +1020,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 }
                 // Timeout to clear "Querying..." if no reply
                 std::thread([&]() {
-                    Sleep(2000);
+                    Sleep(15000);
                     if (g_waitingForIdentity) {
                         std::lock_guard<std::mutex> lock(g_synthNameOverlayMutex);
                         if (g_detectedSynth == "Querying...") g_detectedSynth = "";
@@ -967,13 +1031,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
             // Persist the newly-connected COM port name to settings
             SaveSettings(comName, baseNameStr, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
-            connectionStatus = connMsg.str();
+            SetConnStatus("");
             return true;
         } else {
-            connMsg << "Failed to open " << comName << ". Is it in use?";
             AddLog(LogSourceType::APP_INFO, "Failed to open " + comName);
             ResetSafeSerialPort();
-            connectionStatus = connMsg.str();
+            SetConnStatus("Failed to open " + comName + ". Is it in use?");
             return false;
         }
     };
@@ -992,6 +1055,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         }
         if (done || g_readyToExit.load()) break;
 
+
+
         // First frame: start virtual ports in background, then optionally connect
         if (firstFrame) {
             firstFrame = false;
@@ -1005,51 +1070,72 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             ImVec4 colSysCopy = colSys;
             ImVec4 colInCopy  = colIn;
             std::vector<std::string> portsVecCopy = comPortsVec;
-            // Removed captured midiOk - we'll check it live in the thread
 
             std::thread([&, savedNameCopy, baseNameCopy, autoStart, foundPort,
-                         colOutCopy, colSysCopy, colInCopy, portsVecCopy]() mutable {
+                         colOutCopy, colSysCopy, colInCopy, portsVecCopy, ConnectPort]() mutable {
                 // Wait for MIDI status to leave INITIALIZING
                 while (g_midiStatus.load() == MidiServiceStatus::INITIALIZING) { ::Sleep(100); }
                 bool midiOk = (g_midiStatus.load() == MidiServiceStatus::AVAILABLE);
 
-                // ΓöÇΓöÇ Create virtual MIDI ports (if auto-start is enabled and MIDI is AVAILABLE) ΓöÇΓöÇ
+                // ── Create virtual MIDI ports (if auto-start is enabled and MIDI is AVAILABLE) ──
                 if (midiOk && autoStart) {
+                    g_isConnecting.store(true);
                     std::wstring wBaseName(baseNameCopy.begin(), baseNameCopy.end());
+                    std::string currentlyOpened = "";
                     for (int i = 1; i <= 8; ++i) {
-                        if (!g_portEnabled[i-1].load(std::memory_order_relaxed)) continue;
+                        if (!g_portEnabled[i - 1].load(std::memory_order_relaxed)) continue;
                         std::wstring portName = wBaseName + L" Out " + std::to_wstring(i);
-                        ImVec4 cOut = colOutCopy[i-1];
-                        LogSourceType srcType = (LogSourceType)((int)LogSourceType::APP_OUT_1 + (i-1));
-                        
+                        ImVec4 cOut = colOutCopy[i - 1];
+                        LogSourceType srcType = (LogSourceType)((int)LogSourceType::APP_OUT_1 + (i - 1));
+
                         auto rxCb = [i, cOut, srcType](const std::vector<uint8_t>& data) {
-                                if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
-                                bool isSync = (data.size() == 1 && data[0] >= 0xF8);
-                                SendToSerial(i, data);
-                                AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
-                            };
-                            
+                            if (!g_transmitSync && !data.empty() && data[0] >= 0xF8) return;
+                            bool isSync = (data.size() == 1 && data[0] >= 0xF8);
+                            SendToSerial(i, data);
+                            AddLog(srcType, "[App->COM] P" + std::to_string(i) + ": " + BytesToHex(data), isSync, GetMidiCommandName(data));
+                        };
+
+                        std::string dispCurrent = currentlyOpened;
+                        if (!dispCurrent.empty()) dispCurrent += ", ";
+                        SetConnStatus(dispCurrent + "Opening Out " + std::to_string(i) + "...");
+
                         auto vport = std::make_unique<VirtualMidiPort>(portName, rxCb);
                         int retry = 2;
                         while (!vport->IsValid() && retry <= 10) {
                             vport = std::make_unique<VirtualMidiPort>(portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
                         }
-                        if (vport->IsValid()) AddSafeVirtualPortOut(std::move(vport));
+                        if (vport->IsValid()) {
+                            winrt::hstring deviceId = vport->GetDeviceId();
+                            AddSafeVirtualPortOut(std::move(vport));
+                            WaitForDeviceArrival(deviceId); // Wait for PnP arrival
+                        }
                         else AddSafeVirtualPortOut(nullptr); // Preserve indices
-                    }
+
+                        if (!currentlyOpened.empty()) currentlyOpened += ", ";
+                        currentlyOpened += "Out " + std::to_string(i);
+                    } // Closed the for loop
+
                     if (g_portInEnabled.load(std::memory_order_relaxed)) {
                         std::wstring inPortName = wBaseName + L" In";
+                        std::string outFinished = currentlyOpened;
+                        SetConnStatus(outFinished + "|Opening MIDI In ...");
                         auto vportIn = std::make_shared<VirtualMidiPort>(inPortName, nullptr);
                         int retry = 2;
                         while (!vportIn->IsValid() && retry <= 10) {
                             vportIn = std::make_shared<VirtualMidiPort>(inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
                         }
-                        if (vportIn->IsValid()) SetSafeVirtualPortIn(vportIn);
+                        if (vportIn->IsValid()) {
+                            winrt::hstring deviceId = vportIn->GetDeviceId();
+                            SetSafeVirtualPortIn(vportIn);
+                            WaitForDeviceArrival(deviceId); // Wait for PnP arrival
+                        }
                     }
+                    SetConnStatus(""); // Clear progress text
                     AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports started.");
+                    g_isConnecting.store(false);
                 }
 
-                // ΓöÇΓöÇ Auto-connect to COM port ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
+                // ── Auto-connect to COM port ──
                 if (autoStart && !portsVecCopy.empty()) {
                     if (!savedNameCopy.empty()) {
                         for (int i = 0; i < (int)portsVecCopy.size(); ++i) {
@@ -1059,8 +1145,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                                 return;
                             }
                         }
-                        // Port not available yet ΓÇö connectionLost already set in main
-                    } else {
+                        // Port not available yet — connectionLost already set in main
+                    }
+                    else {
                         ConnectPort(); // no saved name, connect to first
                     }
                 }
@@ -1107,7 +1194,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             if (newCharge == 0.0f) g_chargePercent = 0.0f;
             else g_chargePercent = (g_chargePercent * 0.3f) + (newCharge * 0.7f);
             // Update Win32 title bar
-            std::wstring wTitle = L"ToHost Bridge v1.0";
+            std::wstring wTitle = L"ToHost Bridge v1.3.0";
 
             if (!activeComName.empty()) {
                 char dummyPath[1000];
@@ -1120,7 +1207,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     connectionLost.store(true);
                     ResetSafeSerialPort();   // close the dead handle cleanly
                     AddLog(LogSourceType::APP_INFO, "COM port lost: " + activeComName);
-                    connectionStatus = "COM port disconnected!";
+                    SetConnStatus("COM port disconnected!");
                 }
 
                 // Auto-reconnect when port reappears (triggered by either drop recovery or initial auto-start wait)
@@ -1140,7 +1227,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     } else {
                         // If it fails (e.g. port just appeared but not yet ready),
                         // we keep connectionLost=true so we retry next second.
-                        connectionStatus = "Waiting for " + activeComName + " (retrying)...";
+                        SetConnStatus("Waiting for " + activeComName + " (retrying)...");
                     }
                 }
             }
@@ -1273,7 +1360,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     g_readyToExit.store(true);
                 }).detach();
             }
+            ImGui::End();
         } else {
+
             ImGui::SetNextWindowPos(ImVec2(0, 0));
             ImGui::SetNextWindowSize(io.DisplaySize);
             ImGui::Begin("Main", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
@@ -1353,15 +1442,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
                 // --- TOP: MIDI Service Status / Errors (Highest Priority) ---
                 MidiServiceStatus currentStatus = g_midiStatus.load();
+                bool showMidiError = true;
+                if (currentStatus == MidiServiceStatus::NOT_RESPONDING) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - g_appStartTime).count();
+                    if (elapsed < 40) showMidiError = false;
+                }
+
                 if (currentStatus == MidiServiceStatus::INITIALIZING) {
                     ImGui::TextWrapped("Checking MIDI Service...");
                     ImGui::Separator();
-                } else if (currentStatus == MidiServiceStatus::NOT_RESPONDING || currentStatus == MidiServiceStatus::UNAVAILABLE) {
+                } else if (showMidiError && (currentStatus == MidiServiceStatus::NOT_RESPONDING || currentStatus == MidiServiceStatus::UNAVAILABLE)) {
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.4f, 0.1f, 0.1f, 1.0f));
                     ImGui::BeginChild("MidiError", ImVec2(0, 100 * main_scale), true); // Fixed height for top placement
                     if (currentStatus == MidiServiceStatus::NOT_RESPONDING) {
                         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "CRITICAL ERROR: Windows MIDI Service is not responding.");
-                        ImGui::TextWrapped("Recommendation: Restart computer or stop 'MidiSrv.exe'.");
+                        ImGui::TextWrapped("Recommendation: Restart computer or stop 'Windows MIDI Service'.");
                         if (ImGui::Button("Open Task Manager")) ShellExecuteA(NULL, "open", "taskmgr.exe", NULL, NULL, SW_SHOWNORMAL);
                     } else {
                         ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "ERROR: Windows MIDI Services Runtime is missing.");
@@ -1371,6 +1466,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     ImGui::PopStyleColor();
                     ImGui::Separator();
                 }
+
 
                 bool portsRunning = !GetSafeVirtualPortsOut().empty();
 
@@ -1413,7 +1509,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                             AddLog(LogSourceType::APP_INFO, "Connection aborted: MIDI Service not available.");
                         } else {
                             g_isConnecting.store(true);
-                            connectionStatus = "Connecting...";
+                            SetConnStatus("Connecting...");
                             std::thread([&]() {
                                 std::atomic<bool> portOpDone{false};
                                 std::thread worker([&]() {
@@ -1422,10 +1518,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                                 });
                                 auto start = std::chrono::steady_clock::now();
                                 while (!portOpDone.load()) {
-                                    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 10) {
+                                    if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() >= 15) {
                                         g_midiStatus.store(MidiServiceStatus::NOT_RESPONDING);
-                                        connectionStatus = "Cannot connect: Windows MIDI Service is not responding.";
-                                        AddLog(LogSourceType::APP_INFO, "Connection timed out after 10s (MIDI Service hang).");
+                                        SetConnStatus("Cannot connect: Windows MIDI Service is not responding.");
+                                        AddLog(LogSourceType::APP_INFO, "Connection timed out after 15s (MIDI Service hang).");
                                         if (worker.joinable()) worker.detach();
                                         g_isConnecting.store(false);
                                         return;
@@ -1447,7 +1543,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         g_lastSentPort.store(0, std::memory_order_relaxed);
                         isConnected = false;
                         connectionLost.store(false);
-                        connectionStatus = "Disconnected (virtual ports still active).";
+                        SetConnStatus("Disconnected (virtual ports still active).");
                         AddLog(LogSourceType::APP_INFO, "Disconnected from COM port.");
                     }
                 }
@@ -1554,7 +1650,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                             for (auto& t : cleanThreads) if (t.joinable()) t.join();
                             
                             ClearSafeVirtualPortsOut();
-                            connectionStatus = "Disconnected.";
+                            SetConnStatus("Disconnected.");
                             AddLog(LogSourceType::APP_INFO, "Virtual MIDI ports stopped.");
                             g_isManualStopping.store(false);
                             g_isConnecting.store(false);
@@ -1568,17 +1664,33 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (!g_isManualStopping.load()) {
                     ImGui::BeginChild("StatusScrollArea", ImVec2(0, -footerHeight), false, ImGuiWindowFlags_None);
                     if (g_isConnecting.load()) {
-                        ImGui::TextWrapped("%s", connectionStatus.empty() ? "Connecting..." : connectionStatus.c_str());
+                        std::string curStat = GetConnStatus();
+                        float alignOffset = ImGui::CalcTextSize("Virtual outputs: ").x + 10.0f;
+                        
+                        size_t pipePos = curStat.find('|');
+                        std::string outPart = (pipePos != std::string::npos) ? curStat.substr(0, pipePos) : curStat;
+                        std::string inPart = (pipePos != std::string::npos) ? curStat.substr(pipePos + 1) : "";
+
+                        ImGui::TextColored(lightUI ? ImVec4(0.3f, 0.3f, 0.3f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Virtual outputs:");
+                        ImGui::SameLine(alignOffset);
+                        ImGui::TextWrapped("%s", outPart.empty() ? "None" : outPart.c_str());
+
+                        if (!inPart.empty()) {
+                            ImGui::TextColored(lightUI ? ImVec4(0.3f, 0.3f, 0.3f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Virtual inputs:");
+                            ImGui::SameLine(alignOffset);
+                            ImGui::TextWrapped("%s", inPart.c_str());
+                        }
                     } else if (connectionLost.load()) {
                         ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "COM port disconnected!");
                     } else {
                         if (isConnected) {
-                            // Discover active ports from settings (which are disabled/locked while connected)
+                            // Discover active ports strictly from successfully loaded physical instances
                             std::string outsDisp;
-                            for (int i = 1; i <= 8; ++i) {
-                                if (g_portEnabled[i-1].load()) {
+                            auto activeOuts = GetSafeVirtualPortsOut();
+                            for (int i = 0; i < (int)activeOuts.size(); ++i) {
+                                if (activeOuts[i]) {
                                     if (!outsDisp.empty()) outsDisp += ", ";
-                                    outsDisp += "Out " + std::to_string(i);
+                                    outsDisp += "Out " + std::to_string(i + 1);
                                 }
                             }
                             if (outsDisp.empty()) outsDisp = "None";
@@ -1602,15 +1714,23 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
                             // Row 3: Virtual Outputs
                             ImGui::TextColored(lightUI ? ImVec4(0.3f, 0.3f, 0.3f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Virtual outputs:");
-                            ImGui::SameLine(alignOffset); 
-                            ImGui::TextWrapped("%s", outsDisp.c_str());
+                            ImGui::SameLine(alignOffset);
+                            {
+                                std::string stat = GetConnStatus();
+                                bool stillOpening = !stat.empty() && stat.find("Opening") != std::string::npos;
+                                if (stillOpening) {
+                                    ImGui::TextWrapped("%s", stat.c_str());
+                                } else {
+                                    ImGui::TextWrapped("%s", outsDisp.c_str());
+                                }
+                            }
 
                             // Row 4: Virtual Inputs
                             ImGui::TextColored(lightUI ? ImVec4(0.3f, 0.3f, 0.3f, 1.0f) : ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Virtual inputs:");
                             ImGui::SameLine(alignOffset); 
                             ImGui::TextWrapped("%s", inDisp.c_str());
                         } else {
-                            ImGui::TextWrapped("%s", connectionStatus.c_str());
+                            ImGui::TextWrapped("%s", GetConnStatus().c_str());
                         }
                     }
                     ImGui::EndChild();
@@ -1953,55 +2073,55 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             }
             ImGui::EndTabBar();
         }
-
-        }
         ImGui::End();
+    } // Close the UI 'else' block (started at line 1357)
 
-        // Rendering
-        ImGui::Render();
-        const float clear_color_with_alpha[4] = { clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w };
-        g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-        g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    // Rendering
+    ImGui::Render();
+    const float clear_color_with_alpha[4] = { clear_color.x * clear_color.w, clear_color.y * clear_color.w, clear_color.z * clear_color.w, clear_color.w };
+    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+    g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color_with_alpha);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-        HRESULT hr = g_pSwapChain->Present(1, 0);
-        g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
-    }
+    HRESULT hr = g_pSwapChain->Present(1, 0);
+    g_SwapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+} // Close the while loop (started at line 1042)
 
-    // Exit Cleanup: Silence all and stop playback
-    if (isConnected && GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
-        for (int p = 1; p <= 8; ++p) {
-            std::vector<uint8_t> quiet;
-            for (int ch = 0; ch < 16; ++ch) {
-                quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
-            }
-            quiet.push_back(0xFC); // MIDI Stop
-            SendToSerial(p, quiet);
+// Exit Cleanup: Silence all and stop playback
+if (isConnected && GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
+    for (int p = 1; p <= 8; ++p) {
+        std::vector<uint8_t> quiet;
+        for (int ch = 0; ch < 16; ++ch) {
+            quiet.insert(quiet.end(), { (uint8_t)(0xB0 | ch), 0x7B, 0x00 });
         }
-        
-        // Also send MIDI Stop to virtual Input if active
-        if (auto vpi = GetSafeVirtualPortIn()) {
-            vpi->SendMidi({ 0xFC });
-        }
+        quiet.push_back(0xFC); // MIDI Stop
+        SendToSerial(p, quiet);
     }
-
-    ResetSafeSerialPort();
-    ClearSafeVirtualPortsOut();
-    ResetSafeVirtualPortIn();
-
-    // Persist imgui layout into settings.ini before destroying context
-    SaveImguiIniToSettings();
-
-    ImGui_ImplDX11_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
-
-    CleanupDeviceD3D();
-    ::DestroyWindow(hwnd);
-    ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
-
-    return 0;
+    
+    // Also send MIDI Stop to virtual Input if active
+    if (auto vpi = GetSafeVirtualPortIn()) {
+        vpi->SendMidi({ 0xFC });
+    }
 }
+
+ResetSafeSerialPort();
+ClearSafeVirtualPortsOut();
+ResetSafeVirtualPortIn();
+
+// Persist imgui layout into settings.ini before destroying context
+SaveImguiIniToSettings();
+
+ImGui_ImplDX11_Shutdown();
+ImGui_ImplWin32_Shutdown();
+ImGui::DestroyContext();
+
+CleanupDeviceD3D();
+::DestroyWindow(hwnd);
+::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+
+return 0;
+}
+
 
 bool CreateDeviceD3D(HWND hWnd)
 {
@@ -2128,7 +2248,3 @@ void SendToSerial(int portIdx, const std::vector<uint8_t>& data) {
     sp->Write(data);
     g_bytesSent.fetch_add(data.size(), std::memory_order_relaxed);
 }
-
-
-
-

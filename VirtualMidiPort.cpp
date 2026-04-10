@@ -106,6 +106,11 @@ bool VirtualMidiPort::IsValid() const {
     return m_virtualDevice != nullptr && m_connection != nullptr;
 }
 
+winrt::hstring VirtualMidiPort::GetDeviceId() const {
+    if (m_virtualDevice) return m_virtualDevice.DeviceEndpointDeviceId();
+    return L"";
+}
+
 void VirtualMidiPort::SendMidi(const std::vector<uint8_t>& data) {
     if (m_isClosing || !m_connection || data.empty()) return;
     

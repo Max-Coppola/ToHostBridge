@@ -20,6 +20,7 @@ public:
     static void RemoveStalePorts();
 
     bool IsValid() const;
+    winrt::hstring GetDeviceId() const;
     void SendMidi(const std::vector<uint8_t>& data);
 
 private:
