@@ -14,9 +14,9 @@ This software replaces the 32-bit Yamaha CBX (Serial MIDI) driver for Windows, a
 By using the high-speed "TO HOST" port (38,400 baud), this bridge recreates **5 virtual MIDI ports**, providing up to **80 simultaneous MIDI instruments** (5 ports x 16 channels). This level of control is not possible with a standard single-port USB-to-MIDI interface.
 
 ## Visual Interface
-![Connection Tab](assets/Connection%20tab.png)
-![Debug Tab](assets/Debug%20tab.png)
-![Settings Tab](assets/Settings%20tab.png)
+![Connection Tab](docs/assets/Connection%20tab.png)
+![Debug Tab](docs/assets/Debug%20tab.png)
+![Settings Tab](docs/assets/Settings%20tab.png)
 
 ## Key Features
 - **80-Channel Control**: Maps 5 virtual MIDI ports to the Yamaha multi-port serial protocol.
@@ -62,7 +62,7 @@ ToHost Bridge enables **5 virtual ports** (80 MIDI channels) over a single seria
 - **CBX Out 5**: Physical MIDI OUT A (Channels 1-16)
 
 ## License
-MIT License - Open for all. Created by Max Coppola.
+MIT License - Open for all. Created by Maxime Coppola.
 
 ---
 *Created with ❤️ for the Yamaha XG community.*
