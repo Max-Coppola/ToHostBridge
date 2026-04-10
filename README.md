@@ -11,7 +11,7 @@ This software replaces the 32-bit Yamaha CBX (Serial MIDI) driver for Windows, a
 - **S/VL Series**: S90, S80, S30, VL70-m
 - **Hardware**: CBX-K1, CBX-K2, and many TO HOST equipped Clavinova/PSR models.
 
-By using the high-speed "TO HOST" port (38,400 baud), this bridge recreates **5 virtual MIDI ports**, providing up to **64 + 16 simultaneous MIDI instruments** (5 ports x 16 channels). This level of control is not possible with a standard single-port USB-to-MIDI interface.
+By using the high-speed "TO HOST" port (38,400 baud), this bridge recreates **5 virtual MIDI ports**, providing up to **80 simultaneous MIDI instruments** (5 ports x 16 channels). This level of control is not possible with a standard single-port USB-to-MIDI interface.
 
 ## Visual Interface
 ![Connection Tab](assets/Connection%20tab.png)
@@ -19,7 +19,7 @@ By using the high-speed "TO HOST" port (38,400 baud), this bridge recreates **5 
 ![Settings Tab](assets/Settings%20tab.png)
 
 ## Key Features
-- **128-Channel Control**: Maps 5 virtual MIDI ports to the Yamaha multi-port serial protocol.
+- **80-Channel Control**: Maps 5 virtual MIDI ports to the Yamaha multi-port serial protocol.
 - **Solid SysEx Support**: Engineered for high-fidelity System Exclusive communications, handling bulk dumps and complex edits that many standard MIDI interfaces struggle with.
 - **Auto-Reconnect**: Automatically polls and reconnects to your COM port if it's disconnected or turned off.
 - **Background Operation**: Minimizes to the system tray to stay out of the way while you work.
@@ -54,7 +54,7 @@ The software configures the port with the following settings required by Yamaha 
 
 
 ## Port Mapping (Multiplexing)
-ToHost Bridge enables **5 virtual ports** (64 + 16 MIDI channels) over a single serial connection:
+ToHost Bridge enables **5 virtual ports** (80 MIDI channels) over a single serial connection:
 - **CBX Out 1**: Parts 1-16
 - **CBX Out 2**: Parts 17-32
 - **CBX Out 3**: Parts 33-48
