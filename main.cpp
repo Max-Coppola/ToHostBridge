@@ -439,7 +439,7 @@ void LoadSettings(std::string& comName, char* baseName, bool& autoStart, bool& s
     g_autoGetSynthInfo.store(GetPrivateProfileIntA("General", "AutoGetSynthInfo", 1, ini.c_str()) != 0);
     g_portInEnabled.store(GetPrivateProfileIntA("Ports", "PortInEnabled", 1, ini.c_str()) != 0);
     for (int p = 0; p < 8; ++p)
-        g_portEnabled[p].store(GetPrivateProfileIntA("Ports", ("Port" + std::to_string(p+1) + "Enabled").c_str(), 1, ini.c_str()) != 0);
+        g_portEnabled[p].store(GetPrivateProfileIntA("Ports", ("Port" + std::to_string(p+1) + "Enabled").c_str(), (p < 4 ? 1 : 0), ini.c_str()) != 0);
 
     auto loadColor = [&](const char* key, ImVec4 def) -> ImVec4 {
         char buf[64];
@@ -661,8 +661,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     bool lightUI = false;
     ImVec4 colSys, colIn, colOut[8]; // Corrected size to 8 ports
 
-    // Init port-enable flags to true before LoadSettings (which may override)
-    for (int i = 0; i < 8; ++i) g_portEnabled[i].store(true);
+    // Init port-enable flags to true for first 4 ports before LoadSettings (which may override)
+    for (int i = 0; i < 8; ++i) g_portEnabled[i].store(i < 4);
 
     LoadSettings(savedComName, baseNameBuf, autoStartVirtualMidi, startWithWindows, autoReconnect, startToTray, colSys, colIn, colOut, stayOnTop, startMinimized, lightUI);
     // Sync registry with loaded INI setting (especially important on first run after MSI install)
