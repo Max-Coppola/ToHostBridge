@@ -6,8 +6,8 @@ using namespace winrt;
 using namespace winrt::Microsoft::Windows::Devices::Midi2;
 using namespace winrt::Microsoft::Windows::Devices::Midi2::Endpoints::Virtual;
 
-VirtualMidiPort::VirtualMidiPort(const std::wstring& portName, MidiRxCallback rxCallback)
-    : m_rxCallback(rxCallback), m_portName(portName) {
+VirtualMidiPort::VirtualMidiPort(MidiSession const& sharedSession, const std::wstring& portName, MidiRxCallback rxCallback)
+    : m_rxCallback(rxCallback), m_portName(portName), m_session(sharedSession) {
     try {
         if (!MidiVirtualDeviceManager::IsTransportAvailable()) {
             std::wcerr << L"Windows MIDI Services Virtual Transport is not available." << std::endl;
@@ -32,11 +32,7 @@ VirtualMidiPort::VirtualMidiPort(const std::wstring& portName, MidiRxCallback rx
             return;
         }
 
-        m_session = MidiSession::Create(portName);
-        if (!m_session) {
-            std::wcerr << L"Failed to create MIDI session for " << portName << std::endl;
-            return;
-        }
+
 
         m_connection = m_session.CreateEndpointConnection(m_virtualDevice.DeviceEndpointDeviceId());
         if (!m_connection) {
@@ -92,7 +88,6 @@ VirtualMidiPort::~VirtualMidiPort() {
             try { m_connection = nullptr; } catch (...) {}
         }
         if (m_session) {
-            try { m_session.Close(); } catch (...) {}
             m_session = nullptr;
         }
         // Releasing the virtual device lets the MIDI Service decommission

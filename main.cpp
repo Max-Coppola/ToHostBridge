@@ -172,7 +172,9 @@ std::condition_variable g_creationCv;
 std::unordered_set<std::wstring> g_arrivedDevices; // Stores DeviceId seen by watcher
 winrt::Microsoft::Windows::Devices::Midi2::MidiEndpointDeviceWatcher g_watcher{ nullptr };
 winrt::event_token g_watcherAddedToken;
+winrt::Microsoft::Windows::Devices::Midi2::MidiSession g_sharedMidiSession{ nullptr };
 std::unique_ptr<Microsoft::Windows::Devices::Midi2::Initialization::MidiDesktopAppSdkInitializer> g_midiSdkInitializer;
+std::chrono::steady_clock::time_point g_wmsConnectStartTime;
 
 void WaitForDeviceArrival(winrt::hstring deviceId, int timeoutMs = 2000) {
     if (deviceId.empty()) return;
@@ -558,6 +560,7 @@ winrt::fire_and_forget CheckForUpdatesAsync(HWND hwnd) {
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
     auto g_appStartTime = std::chrono::steady_clock::now();
+    g_wmsConnectStartTime = std::chrono::steady_clock::time_point{}; // Initialize to 'epoch' (not started)
 
 
 
@@ -597,6 +600,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         if (sdkAvailable) {
             midiAvailable.store(true);
             g_midiStatus.store(MidiServiceStatus::AVAILABLE);
+
+            try {
+                g_sharedMidiSession = winrt::Microsoft::Windows::Devices::Midi2::MidiSession::Create(L"ToHost Bridge Session");
+                g_wmsConnectStartTime = std::chrono::steady_clock::now();
+                AddLog(LogSourceType::APP_INFO, "Establishing WMS service connection...");
+            } catch (...) {
+                AddLog(LogSourceType::APP_INFO, "Failed to create shared MIDI session.");
+            }
 
             // Setup and start the active device watcher
             try {
@@ -855,10 +866,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 if (!dispCurrent.empty()) dispCurrent += ", ";
                 SetConnStatus(dispCurrent + "Opening Out " + std::to_string(i) + "...");
                 
-                auto vport = std::make_unique<VirtualMidiPort>(portName, rxCb);
+                auto vport = std::make_unique<VirtualMidiPort>(g_sharedMidiSession, portName, rxCb);
                 int retry = 2;
                 while (!vport->IsValid() && retry <= 10) {
-                    vport = std::make_unique<VirtualMidiPort>(portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
+                    vport = std::make_unique<VirtualMidiPort>(g_sharedMidiSession, portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
                 }
                 if (vport->IsValid()) {
                     winrt::hstring deviceId = vport->GetDeviceId();
@@ -874,10 +885,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                 std::wstring inPortName = wBaseName + L" In";
                 std::string outFinished = currentlyOpened;
                 SetConnStatus(outFinished + "|Opening MIDI In ...");
-                auto vportIn = std::make_shared<VirtualMidiPort>(inPortName, nullptr);
+                auto vportIn = std::make_shared<VirtualMidiPort>(g_sharedMidiSession, inPortName, nullptr);
                 int retry = 2;
                 while (!vportIn->IsValid() && retry <= 10) {
-                    vportIn = std::make_shared<VirtualMidiPort>(inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
+                    vportIn = std::make_shared<VirtualMidiPort>(g_sharedMidiSession, inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
                 }
                 if (vportIn->IsValid()) {
                     winrt::hstring deviceId = vportIn->GetDeviceId();
@@ -1092,10 +1103,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         if (!dispCurrent.empty()) dispCurrent += ", ";
                         SetConnStatus(dispCurrent + "Opening Out " + std::to_string(i) + "...");
 
-                        auto vport = std::make_unique<VirtualMidiPort>(portName, rxCb);
+                        auto vport = std::make_unique<VirtualMidiPort>(g_sharedMidiSession, portName, rxCb);
                         int retry = 2;
                         while (!vport->IsValid() && retry <= 10) {
-                            vport = std::make_unique<VirtualMidiPort>(portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
+                            vport = std::make_unique<VirtualMidiPort>(g_sharedMidiSession, portName + L" (" + std::to_wstring(retry++) + L")", rxCb);
                         }
                         if (vport->IsValid()) {
                             winrt::hstring deviceId = vport->GetDeviceId();
@@ -1112,10 +1123,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                         std::wstring inPortName = wBaseName + L" In";
                         std::string outFinished = currentlyOpened;
                         SetConnStatus(outFinished + "|Opening MIDI In ...");
-                        auto vportIn = std::make_shared<VirtualMidiPort>(inPortName, nullptr);
+                        auto vportIn = std::make_shared<VirtualMidiPort>(g_sharedMidiSession, inPortName, nullptr);
                         int retry = 2;
                         while (!vportIn->IsValid() && retry <= 10) {
-                            vportIn = std::make_shared<VirtualMidiPort>(inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
+                            vportIn = std::make_shared<VirtualMidiPort>(g_sharedMidiSession, inPortName + L" (" + std::to_wstring(retry++) + L")", nullptr);
                         }
                         if (vportIn->IsValid()) {
                             winrt::hstring deviceId = vportIn->GetDeviceId();
@@ -1659,7 +1670,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
                 if (!g_isManualStopping.load()) {
                     ImGui::BeginChild("StatusScrollArea", ImVec2(0, -footerHeight), false, ImGuiWindowFlags_None);
-                    if (g_isConnecting.load()) {
+                    
+                    bool showWmsMessage = false;
+                    if (g_wmsConnectStartTime != std::chrono::steady_clock::time_point{}) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - g_wmsConnectStartTime).count();
+                        if (elapsed < 20) {
+                            showWmsMessage = true;
+                            ImGui::TextWrapped("Establishing WMS service connection...");
+                        }
+                    }
+
+                    if (showWmsMessage) {
+                        // Already showed it
+                    } else if (g_isConnecting.load()) {
                         std::string curStat = GetConnStatus();
                         float alignOffset = ImGui::CalcTextSize("Virtual outputs: ").x + 10.0f;
                         
@@ -2104,6 +2128,11 @@ if (isConnected && GetSafeSerialPort() && GetSafeSerialPort()->IsOpen()) {
 ResetSafeSerialPort();
 ClearSafeVirtualPortsOut();
 ResetSafeVirtualPortIn();
+
+if (g_sharedMidiSession) {
+    try { g_sharedMidiSession.Close(); } catch (...) {}
+    g_sharedMidiSession = nullptr;
+}
 
 // Persist imgui layout into settings.ini before destroying context
 SaveImguiIniToSettings();

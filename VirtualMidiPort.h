@@ -14,7 +14,7 @@ using MidiRxCallback = std::function<void(const std::vector<uint8_t>&)>;
 
 class VirtualMidiPort {
 public:
-    VirtualMidiPort(const std::wstring& portName, MidiRxCallback rxCallback = nullptr);
+    VirtualMidiPort(winrt::Microsoft::Windows::Devices::Midi2::MidiSession const& sharedSession, const std::wstring& portName, MidiRxCallback rxCallback = nullptr);
     ~VirtualMidiPort();
 
     static void RemoveStalePorts();
