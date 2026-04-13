@@ -70,7 +70,6 @@ VirtualMidiPort::~VirtualMidiPort() {
 
     // Brief pause: let any in-flight OnMessageReceived / SendMidi calls
     // that already passed the m_isClosing check above finish naturally.
-    // 50 ms is more than enough for one MIDI callback round-trip.
     ::Sleep(50);
 
     // Now acquire exclusive access – guarantees no callback is mid-execution
@@ -78,22 +77,32 @@ VirtualMidiPort::~VirtualMidiPort() {
 
     try {
         if (m_connection) {
-            // Unregister our receive handler FIRST so no new callbacks fire
-            // even if an external client (e.g. Data Filer) still has the port open.
+            // Unregister our receive handler
             if (m_messageReceivedToken.value != 0) {
                 try { m_connection.MessageReceived(m_messageReceivedToken); } catch (...) {}
                 m_messageReceivedToken = {};
             }
-            // Release our end of the connection
-            try { m_connection = nullptr; } catch (...) {}
+            
+            // Capture connection Id for session cleanup
+            auto connId = m_connection.ConnectionId();
+
+            // Explicitly close the connection (IClosable)
+            try { m_connection.as<winrt::Windows::Foundation::IClosable>().Close(); } catch (...) {}
+            m_connection = nullptr;
+
+            // Explicitly remove from session
+            if (m_session) {
+                try { m_session.DisconnectEndpointConnection(connId); } catch (...) {}
+            }
         }
-        if (m_session) {
-            m_session = nullptr;
+        
+        if (m_virtualDevice) {
+            // Explicitly close the virtual device to trigger PnP removal
+            try { m_virtualDevice.as<winrt::Windows::Foundation::IClosable>().Close(); } catch (...) {}
+            m_virtualDevice = nullptr;
         }
-        // Releasing the virtual device lets the MIDI Service decommission
-        // the endpoint once ALL external clients (including the Data Filer)
-        // have released their own handles.
-        try { m_virtualDevice = nullptr; } catch (...) {}
+
+        m_session = nullptr;
     } catch (...) {}
 }
 
