@@ -6,6 +6,9 @@ using namespace winrt;
 using namespace winrt::Microsoft::Windows::Devices::Midi2;
 using namespace winrt::Microsoft::Windows::Devices::Midi2::Endpoints::Virtual;
 
+// ---------------------------------------------------------------------------
+// Original constructor — creates device + opens connection (slow on cold service)
+// ---------------------------------------------------------------------------
 VirtualMidiPort::VirtualMidiPort(MidiSession const& sharedSession, const std::wstring& portName, MidiRxCallback rxCallback)
     : m_rxCallback(rxCallback), m_portName(portName), m_session(sharedSession) {
     try {
@@ -31,8 +34,6 @@ VirtualMidiPort::VirtualMidiPort(MidiSession const& sharedSession, const std::ws
             std::wcerr << L"Failed to create virtual device for " << portName << std::endl;
             return;
         }
-
-
 
         m_connection = m_session.CreateEndpointConnection(m_virtualDevice.DeviceEndpointDeviceId());
         if (!m_connection) {
@@ -61,6 +62,85 @@ VirtualMidiPort::VirtualMidiPort(MidiSession const& sharedSession, const std::ws
         m_virtualDevice = nullptr;
         m_connection = nullptr;
         m_session = nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Static: Pre-register a virtual device WITHOUT opening a connection.
+// Call this immediately after MidiSession::Create so the Windows MIDI Service
+// can complete the PnP registration while the app is still loading.
+// ---------------------------------------------------------------------------
+PreRegisteredVirtualDevice VirtualMidiPort::PreRegister(const std::wstring& portName) {
+    PreRegisteredVirtualDevice result;
+    result.portName = portName;
+    try {
+        if (!MidiVirtualDeviceManager::IsTransportAvailable()) {
+            std::wcerr << L"[PreRegister] Virtual transport not available for: " << portName << std::endl;
+            return result;
+        }
+
+        MidiDeclaredEndpointInfo info{};
+        info.Name = portName;
+        info.SpecificationVersionMajor = 1;
+        info.SpecificationVersionMinor = 0;
+        info.SupportsMidi10Protocol = true;
+
+        MidiVirtualDeviceCreationConfig config(
+            portName, 
+            L"Virtual MIDI Port", 
+            L"MidiSerialBridge", 
+            info);
+
+        auto device = MidiVirtualDeviceManager::CreateVirtualDevice(config);
+        if (!device) {
+            std::wcerr << L"[PreRegister] CreateVirtualDevice returned null for: " << portName << std::endl;
+            return result;
+        }
+
+        result.device = device;
+        result.deviceEndpointId = device.DeviceEndpointDeviceId();
+        result.valid = true;
+        std::wcout << L"[PreRegister] OK: " << portName << std::endl;
+    } catch (winrt::hresult_error const& ex) {
+        std::wcerr << L"[PreRegister] HResult error for " << portName << L": " << ex.message().c_str() << std::endl;
+    } catch (...) {
+        std::wcerr << L"[PreRegister] Exception for: " << portName << std::endl;
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Fast-path constructor: device is already registered in the MIDI service.
+// Skips CreateVirtualDevice (the slow IPC call).
+// Only calls CreateEndpointConnection + Open, which are near-instant.
+// ---------------------------------------------------------------------------
+VirtualMidiPort::VirtualMidiPort(MidiSession const& sharedSession, const PreRegisteredVirtualDevice& preReg, MidiRxCallback rxCallback)
+    : m_rxCallback(rxCallback), m_portName(preReg.portName), m_session(sharedSession) {
+
+    if (!preReg.valid || !preReg.device) {
+        std::wcerr << L"[FastConnect] Invalid pre-registration for: " << preReg.portName << std::endl;
+        return;
+    }
+
+    m_virtualDevice = preReg.device;
+
+    try {
+        m_connection = m_session.CreateEndpointConnection(preReg.deviceEndpointId);
+        if (!m_connection) {
+            std::wcerr << L"[FastConnect] Null connection for: " << preReg.portName << std::endl;
+            return;
+        }
+        if (m_rxCallback) {
+            m_messageReceivedToken = m_connection.MessageReceived({ this, &VirtualMidiPort::OnMessageReceived });
+        }
+        m_connection.Open();
+        std::wcout << L"[FastConnect] Opened: " << preReg.portName << std::endl;
+    } catch (winrt::hresult_error const& ex) {
+        std::wcerr << L"[FastConnect] Error for " << preReg.portName << L": " << ex.message().c_str() << std::endl;
+        m_connection = nullptr;
+    } catch (...) {
+        std::wcerr << L"[FastConnect] Unknown error for: " << preReg.portName << std::endl;
+        m_connection = nullptr;
     }
 }
 
@@ -157,11 +237,10 @@ void VirtualMidiPort::SendMidi(const std::vector<uint8_t>& data) {
                 m_connection.SendSingleMessageWords(0, (0x3u << 28) | (0u << 20) | (0u << 16), 0);
             } else {
                 while (bytesSent < sysex.size()) {
-                    // Use size_t to avoid uint8_t overflow on payloads >= 256 bytes
                     size_t remaining  = sysex.size() - bytesSent;
                     size_t chunkCount = (remaining > 6) ? 6 : remaining;
                     
-                    uint8_t umpStatus; // 0=Complete, 1=Start, 2=Continue, 3=End
+                    uint8_t umpStatus;
                     if (sysex.size() <= 6)                       umpStatus = 0;
                     else if (bytesSent == 0)                      umpStatus = 1;
                     else if (bytesSent + chunkCount >= sysex.size()) umpStatus = 3;
@@ -225,7 +304,6 @@ void VirtualMidiPort::OnMessageReceived(
         }
         
         auto push_safe = [&](uint8_t b) {
-            // Some drivers incorrectly include F0/F7 in the payload. We skip them to avoid double-delimiters.
             if (b != 0xF0 && b != 0xF7) m_sysExAccumulator.push_back(b);
         };
 
