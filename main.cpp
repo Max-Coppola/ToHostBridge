@@ -690,7 +690,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(nullptr), LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)), nullptr, nullptr, nullptr, L"ToHostBridge", LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1)) };
     ::RegisterClassExW(&wc);
     // Adjusted window dimensions for bold headers and better spacing
-    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.3.1", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"ToHost Bridge v1.3.2", WS_OVERLAPPEDWINDOW, 100, 100, (int)(530 * main_scale), (int)(430 * main_scale), nullptr, nullptr, wc.hInstance, nullptr);
 
     // Initial check for Microsoft Store updates
     CheckForUpdatesAsync(hwnd);
@@ -1283,7 +1283,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             if (newCharge == 0.0f) g_chargePercent = 0.0f;
             else g_chargePercent = (g_chargePercent * 0.3f) + (newCharge * 0.7f);
             // Update Win32 title bar
-            std::wstring wTitle = L"ToHost Bridge v1.3.1";
+            std::wstring wTitle = L"ToHost Bridge v1.3.2";
 
             if (!activeComName.empty()) {
                 char dummyPath[1000];
